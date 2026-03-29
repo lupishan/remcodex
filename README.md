@@ -6,6 +6,8 @@
 Run Codex once on your computer.  
 Watch, approve, and control it from any device.
 
+🌐 https://remcodex.com
+
 > Not a wrapper. Not a proxy.  
 > A real-time control layer for AI execution.  
 > Turns AI execution into a controllable system.
