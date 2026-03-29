@@ -279,8 +279,9 @@ async function main() {
     return;
   }
 
-  const command = argv[0] && !argv[0].startsWith("-") ? argv[0] : "start";
-  const flagArgs = command === "start" ? argv.slice(1) : argv;
+  const hasExplicitCommand = Boolean(argv[0] && !argv[0].startsWith("-"));
+  const command = hasExplicitCommand ? argv[0] : "start";
+  const flagArgs = hasExplicitCommand ? argv.slice(1) : argv;
   const flags = parseFlags(flagArgs);
 
   switch (command) {
