@@ -1,0 +1,36 @@
+{
+  "name": "remcodex",
+  "version": "0.1.0-beta.3",
+  "description": "Control Codex from anywhere. Even on your phone.",
+  "license": "MIT",
+  "bin": {
+    "remcodex": "dist/server/src/cli.js"
+  },
+  "files": [
+    "dist",
+    "web",
+    "scripts/fix-node-pty-helper.js",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/fix-node-pty-helper.js",
+    "dev": "tsx watch server/src/app.ts",
+    "start": "tsx server/src/cli.ts --no-open",
+    "build": "tsc -p tsconfig.json",
+    "cli": "tsx server/src/cli.ts --no-open"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "markdown-it": "^14.1.1",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.10",
+    "@types/ws": "^8.5.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
