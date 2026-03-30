@@ -1394,13 +1394,16 @@ button:hover {
 
 .approval-banner {
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 0.6rem;
   margin-bottom: 0.7rem;
   padding: 0.72rem 0.82rem;
+  max-height: min(46dvh, 24rem);
   border-radius: 14px;
   border: 1px solid rgba(188, 90, 48, 0.16);
   background: rgba(255, 248, 238, 0.96);
   box-shadow: 0 6px 16px rgba(169, 77, 38, 0.06);
+  overflow: hidden;
 }
 
 .approval-banner[aria-busy="true"] {
@@ -1411,6 +1414,14 @@ button:hover {
 .approval-banner-copy {
   display: grid;
   gap: 0.28rem;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  padding-right: 0.18rem;
 }
 
 .approval-banner-head {
@@ -1496,6 +1507,9 @@ button:hover {
   display: flex;
   gap: 0.55rem;
   flex-wrap: wrap;
+  flex-shrink: 0;
+  padding-top: 0.15rem;
+  border-top: 1px solid rgba(188, 90, 48, 0.12);
 }
 
 .approval-banner-actions .primary-button,
@@ -5104,6 +5118,13 @@ button:hover {
     padding-right: env(safe-area-inset-right, 0px);
   }
 
+  .composer-panel:has(#session-approval-slot .approval-banner) {
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 3rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
   .composer-dock {
     max-width: 100%;
   }
@@ -5112,6 +5133,7 @@ button:hover {
     gap: 0.45rem;
     margin-bottom: 0.45rem;
     padding: 0.56rem 0.62rem;
+    max-height: min(40dvh, 18rem);
   }
 }
 
