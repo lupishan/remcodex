@@ -15,6 +15,7 @@ import {
   getSessionTimelineEvents,
   getSessions,
   resolveSessionApproval,
+  retrySessionApproval,
   sendMessage,
   stopSession,
   syncImportedSession,
@@ -613,14 +614,10 @@ function resolveDetailPendingApproval(session, timelineState) {
   const sessionPending = session?.pendingApproval || null;
   const liveBusy = session?.liveBusy === true;
   const sessionId = String(session?.sessionId || "").trim();
-
-  if (!liveBusy) {
-    return null;
-  }
+  const canResolve = liveBusy && sessionPending?.resumable !== false;
 
   if (!timelinePending) {
     return sessionPending &&
-      sessionPending.resumable !== false &&
       !isApprovalSuppressed(sessionId, sessionPending.requestId, sessionPending.callId)
       ? sessionPending
       : null;
@@ -629,7 +626,7 @@ function resolveDetailPendingApproval(session, timelineState) {
   return {
     ...timelinePending,
     ...(sessionPending && sessionPending.requestId === timelinePending.requestId ? sessionPending : {}),
-    resumable: true,
+    resumable: canResolve,
   };
 }
 
@@ -7041,6 +7038,15 @@ function renderPendingApprovalBar(detailState) {
   const restoreHint = !canResolve
     ? `<p class="approval-banner-meta approval-banner-meta--warning">${escapeHtml(t("approval.restoreHint"))}</p>`
     : "";
+  const actionHtml = canResolve
+    ? `
+        <button type="button" class="secondary-button" data-approval-decision="decline">${escapeHtml(t("approval.deny"))}</button>
+        <button type="button" class="secondary-button" data-approval-decision="accept">${escapeHtml(t("approval.allowOnce"))}</button>
+        <button type="button" class="primary-button" data-approval-decision="acceptForSession">${escapeHtml(t("approval.allowForTurn"))}</button>
+      `
+    : `
+        <button type="button" class="primary-button" data-approval-retry="true">${escapeHtml(t("approval.retryAction"))}</button>
+      `;
 
   return `
     <section class="approval-banner" data-approval-id="${escapeHtml(approval.requestId)}" data-approval-resumable="${canResolve ? "true" : "false"}">
@@ -7073,9 +7079,7 @@ function renderPendingApprovalBar(detailState) {
         ${restoreHint}
       </div>
       <div class="approval-banner-actions">
-        <button type="button" class="secondary-button" data-approval-decision="decline" ${canResolve ? "" : "disabled"}>${escapeHtml(t("approval.deny"))}</button>
-        <button type="button" class="secondary-button" data-approval-decision="accept" ${canResolve ? "" : "disabled"}>${escapeHtml(t("approval.allowOnce"))}</button>
-        <button type="button" class="primary-button" data-approval-decision="acceptForSession" ${canResolve ? "" : "disabled"}>${escapeHtml(t("approval.allowForTurn"))}</button>
+        ${actionHtml}
       </div>
     </section>
   `;
@@ -7083,7 +7087,52 @@ function renderPendingApprovalBar(detailState) {
 
 function bindPendingApprovalControls(sessionId) {
   const banner = document.querySelector("#session-approval-slot .approval-banner");
-  if (!banner || banner.getAttribute("data-approval-resumable") === "false") {
+  if (!banner) {
+    return;
+  }
+
+  const retryButton = banner.querySelector("[data-approval-retry]");
+  if (retryButton instanceof HTMLButtonElement) {
+    retryButton.onclick = async () => {
+      const approval = state.detail.pendingApproval;
+      const requestId = banner.getAttribute("data-approval-id");
+      if (!approval || !requestId) {
+        return;
+      }
+
+      const previousPendingApproval = { ...approval };
+      const previousStatus = state.detail.session?.status || "waiting_input";
+      const previousLiveBusy = Boolean(state.detail.session?.liveBusy);
+      retryButton.disabled = true;
+      banner.setAttribute("aria-busy", "true");
+      state.detail.pendingApproval = null;
+      if (state.detail.session?.sessionId === sessionId) {
+        state.detail.session.status = "running";
+        state.detail.session.liveBusy = true;
+      }
+      scheduleSessionDetailRender({ immediate: true });
+
+      try {
+        const codex = buildCodexLaunchPayload(
+          state.detail.codexLaunch,
+          state.detail.codexUiOptions,
+        );
+        const payload = codex ? { codex } : {};
+        await retrySessionApproval(sessionId, requestId, payload);
+        await resumeActiveSessionDetail("approval-retry");
+      } catch (error) {
+        state.detail.pendingApproval = previousPendingApproval;
+        if (state.detail.session?.sessionId === sessionId) {
+          state.detail.session.status = previousStatus;
+          state.detail.session.liveBusy = previousLiveBusy;
+        }
+        scheduleSessionDetailRender({ immediate: true });
+        showToast(messageOf(error));
+      }
+    };
+  }
+
+  if (banner.getAttribute("data-approval-resumable") === "false") {
     return;
   }
 

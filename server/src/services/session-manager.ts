@@ -453,6 +453,51 @@ export class SessionManager {
     return { accepted: true };
   }
 
+  retryApprovalRequest(
+    sessionId: string,
+    requestId: string,
+    codexLaunch?: CodexExecLaunchInput,
+  ): { accepted: true; turnId: string } {
+    const session = this.getSessionOrThrow(sessionId);
+    const project = this.options.projectManager.getProject(session.project_id);
+    if (!project) {
+      throw new AppError(404, "Project not found for session.");
+    }
+
+    const currentRunner = this.runners.get(sessionId);
+    const busyStatuses: SessionStatus[] = ["starting", "running", "stopping"];
+    if (currentRunner?.runner.isAlive() && busyStatuses.includes(session.status)) {
+      throw new AppError(409, "Session already has an active task.");
+    }
+
+    const pending =
+      this.pendingApprovals.get(sessionId)?.get(requestId) ??
+      this.restorePendingApprovalFromEvents(sessionId, requestId);
+    if (!pending) {
+      throw new AppError(404, "Approval request not found.");
+    }
+
+    const turnId = createId("turn");
+    const runtimePrompt = normalizeDemoPrompt(
+      project.path,
+      this.buildApprovalRetryRuntimePrompt(pending),
+    );
+
+    this.startRunner(
+      sessionId,
+      project.path,
+      runtimePrompt,
+      turnId,
+      this.resolveResumeThreadId(session),
+      codexLaunch,
+    );
+
+    return {
+      accepted: true,
+      turnId,
+    };
+  }
+
   resolveApproval(
     sessionId: string,
     requestId: string,
@@ -1845,6 +1890,40 @@ export class SessionManager {
     }
 
     return null;
+  }
+
+  private buildApprovalRetryRuntimePrompt(approval: PendingApproval): string {
+    const commandText = this.extractApprovalCommand(approval.method, approval.params);
+    const reason =
+      typeof approval.params.reason === "string" && approval.params.reason.trim()
+        ? approval.params.reason.trim()
+        : "";
+
+    if (commandText) {
+      return [
+        "Re-run the exact operation that previously requested approval.",
+        "Do not do extra exploration.",
+        "As soon as the approval prompt appears again, stop and wait for the user decision.",
+        "",
+        commandText,
+      ].join("\n");
+    }
+
+    if (reason) {
+      return [
+        "Re-run the exact step that previously requested approval.",
+        "Do not do extra exploration.",
+        "As soon as the approval prompt appears again, stop and wait for the user decision.",
+        "",
+        `Original approval reason: ${reason}`,
+      ].join("\n");
+    }
+
+    return [
+      "Re-run the exact step that previously requested approval.",
+      "Do not do extra exploration.",
+      "As soon as the approval prompt appears again, stop and wait for the user decision.",
+    ].join("\n");
   }
 
   private describeApprovalTitle(method: string): string {

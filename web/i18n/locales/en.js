@@ -198,6 +198,7 @@ export default {
   "approval.restore": "Restart required",
   "approval.continueHint": "This step needs your approval before execution can continue.",
   "approval.restoreHint": "This approval request was restored from history and the runtime is no longer active. Send the task again to request approval one more time.",
+  "approval.retryAction": "Request again",
   "approval.deny": "Deny",
   "approval.allowOnce": "Allow once",
   "approval.allowForTurn": "Allow for turn",

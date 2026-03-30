@@ -198,6 +198,7 @@ export default {
   "approval.restore": "需重新发起",
   "approval.continueHint": "这一步需要你的确认后才能继续执行。",
   "approval.restoreHint": "这条授权请求是从历史事件恢复的，当前运行已经结束。请重新发送这轮任务以再次发起授权。",
+  "approval.retryAction": "重新发起授权",
   "approval.deny": "拒绝",
   "approval.allowOnce": "允许一次",
   "approval.allowForTurn": "本轮允许",

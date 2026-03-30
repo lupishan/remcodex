@@ -138,6 +138,13 @@ export function resolveSessionApproval(sessionId, requestId, decision) {
   });
 }
 
+export function retrySessionApproval(sessionId, requestId, payload = {}) {
+  return request(`/api/sessions/${sessionId}/approvals/${encodeURIComponent(requestId)}/retry`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getHealth() {
   return request("/health");
 }

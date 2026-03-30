@@ -5,6 +5,7 @@ import { CodexRolloutSyncService } from "../services/codex-rollout-sync";
 import { ProjectManager } from "../services/project-manager";
 import { SessionManager } from "../services/session-manager";
 import { SessionTimelineService } from "../services/session-timeline-service";
+import { normalizeCodexExecLaunchInput } from "../utils/codex-launch";
 
 export function createSessionRouter(
   sessionManager: SessionManager,
@@ -197,6 +198,21 @@ export function createSessionRouter(
         request.params.sessionId,
         requestId,
         decision,
+      );
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post("/:sessionId/approvals/:requestId/retry", (request, response, next) => {
+    try {
+      const body = request.body as { codex?: unknown };
+      const launch = normalizeCodexExecLaunchInput(body.codex);
+      const result = sessionManager.retryApprovalRequest(
+        request.params.sessionId,
+        request.params.requestId,
+        launch,
       );
       response.json(result);
     } catch (error) {
