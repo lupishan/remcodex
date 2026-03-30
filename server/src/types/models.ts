@@ -120,11 +120,18 @@ export interface CommandStartPayload {
 export interface CommandOutputDeltaPayload {
   textDelta: string;
   stream: IoStream;
+  truncated?: boolean;
 }
 
 export interface CommandEndPayload {
   command?: string | null;
   cwd?: string | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  aggregatedOutput?: string | null;
+  formattedOutput?: string | null;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
   status?: string | null;
   exitCode?: number | null;
   durationMs?: number | null;

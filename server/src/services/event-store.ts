@@ -83,9 +83,30 @@ export class EventStore {
       .get(id) as SessionEventRecord;
 
     const event = this.toPayload(row);
-    this.captureLatestQuota(sessionId, event);
-    this.emitter.emit(this.channel(sessionId), event);
-    return event;
+    return this.publish(event);
+  }
+
+  publishTransient(
+    sessionId: string,
+    input: EventInsertInput,
+    seq: number,
+  ): SessionEventPayload {
+    const event = {
+      id: input.id?.trim() || createId("evt"),
+      sessionId,
+      type: input.type,
+      seq,
+      timestamp: input.timestamp?.trim() || new Date().toISOString(),
+      turnId: input.turnId ?? null,
+      messageId: input.messageId ?? null,
+      callId: input.callId ?? null,
+      requestId: input.requestId ?? null,
+      phase: input.phase ?? null,
+      stream: this.normalizeStream(input.stream),
+      payload: input.payload ?? {},
+    } as SessionEventPayload;
+
+    return this.publish(event);
   }
 
   list(
@@ -323,7 +344,7 @@ export class EventStore {
     };
   }
 
-  private nextSeq(sessionId: string): number {
+  latestSeq(sessionId: string): number {
     const row = this.db
       .prepare(
         `
@@ -334,7 +355,17 @@ export class EventStore {
       )
       .get(sessionId) as { current_seq: number };
 
-    return row.current_seq + 1;
+    return row.current_seq;
+  }
+
+  private nextSeq(sessionId: string): number {
+    return this.latestSeq(sessionId) + 1;
+  }
+
+  private publish(event: SessionEventPayload): SessionEventPayload {
+    this.captureLatestQuota(event.sessionId, event);
+    this.emitter.emit(this.channel(event.sessionId), event);
+    return event;
   }
 
   private toPayload(row: SessionEventRecord): SessionEventPayload {

@@ -8,9 +8,33 @@ const TURN_STATUS_PRIORITY = {
   failed: 3,
   aborted: 4,
 };
+const MAX_COMMAND_OUTPUT_CHARS = 80 * 1024;
+const MAX_PATCH_OUTPUT_CHARS = 48 * 1024;
+const OUTPUT_TRUNCATION_NOTICE = "\n\n[output truncated]\n";
 
 function createItemIndex() {
   return new Map();
+}
+
+function clampOutputText(text, maxChars = MAX_COMMAND_OUTPUT_CHARS) {
+  const safeText = String(text || "");
+  if (!safeText) {
+    return "";
+  }
+  if (safeText.endsWith(OUTPUT_TRUNCATION_NOTICE)) {
+    return safeText;
+  }
+
+  const contentLimit = Math.max(0, maxChars - OUTPUT_TRUNCATION_NOTICE.length);
+  if (safeText.length <= contentLimit) {
+    return safeText;
+  }
+
+  return `${safeText.slice(0, contentLimit)}${OUTPUT_TRUNCATION_NOTICE}`;
+}
+
+function appendClampedOutput(currentText, textDelta, maxChars = MAX_COMMAND_OUTPUT_CHARS) {
+  return clampOutputText(`${String(currentText || "")}${String(textDelta || "")}`, maxChars);
 }
 
 function nextTurnFallbackId(event) {
@@ -526,10 +550,18 @@ export function reduceTimeline(state, event) {
       const nextStdout =
         event.payload?.stream === "stderr"
           ? currentCommand?.stdout || ""
-          : appendDeltaText(currentCommand?.stdout, event.payload?.textDelta);
+          : appendClampedOutput(
+              currentCommand?.stdout,
+              event.payload?.textDelta,
+              MAX_COMMAND_OUTPUT_CHARS,
+            );
       const nextStderr =
         event.payload?.stream === "stderr"
-          ? appendDeltaText(currentCommand?.stderr, event.payload?.textDelta)
+          ? appendClampedOutput(
+              currentCommand?.stderr,
+              event.payload?.textDelta,
+              MAX_COMMAND_OUTPUT_CHARS,
+            )
           : currentCommand?.stderr || "";
       upsertCommand(state, event, turnId, {
         status: currentCommand?.status === "awaiting_approval" ? "awaiting_approval" : "running",
@@ -552,14 +584,22 @@ export function reduceTimeline(state, event) {
         status: completedStatus,
         command: event.payload?.command || state.commandsByCallId[event.callId]?.command || "",
         cwd: event.payload?.cwd || state.commandsByCallId[event.callId]?.cwd || null,
-        stdout: event.payload?.stdout || state.commandsByCallId[event.callId]?.stdout || "",
-        stderr: event.payload?.stderr || state.commandsByCallId[event.callId]?.stderr || "",
-        output:
+        stdout: clampOutputText(
+          event.payload?.stdout || state.commandsByCallId[event.callId]?.stdout || "",
+          MAX_COMMAND_OUTPUT_CHARS,
+        ),
+        stderr: clampOutputText(
+          event.payload?.stderr || state.commandsByCallId[event.callId]?.stderr || "",
+          MAX_COMMAND_OUTPUT_CHARS,
+        ),
+        output: clampOutputText(
           event.payload?.aggregatedOutput ||
-          event.payload?.formattedOutput ||
-          event.payload?.output ||
-          state.commandsByCallId[event.callId]?.output ||
-          "",
+            event.payload?.formattedOutput ||
+            event.payload?.output ||
+            state.commandsByCallId[event.callId]?.output ||
+            "",
+          MAX_COMMAND_OUTPUT_CHARS,
+        ),
         exitCode:
           event.payload?.exitCode ?? state.commandsByCallId[event.callId]?.exitCode ?? null,
         duration: event.payload?.duration || state.commandsByCallId[event.callId]?.duration || null,
@@ -583,7 +623,11 @@ export function reduceTimeline(state, event) {
       const currentPatch = state.patchesByCallId[patchId];
       upsertPatch(state, event, turnId, {
         status: currentPatch?.status || "running",
-        output: appendDeltaText(currentPatch?.output, event.payload?.textDelta),
+        output: appendClampedOutput(
+          currentPatch?.output,
+          event.payload?.textDelta,
+          MAX_PATCH_OUTPUT_CHARS,
+        ),
         outputStatus: "streaming",
       });
       setTurnStatus(turn, "running");
@@ -598,9 +642,18 @@ export function reduceTimeline(state, event) {
         status: patchStatus,
         patchText:
           event.payload?.patchText || state.patchesByCallId[event.callId]?.patchText || "",
-        output: event.payload?.output || state.patchesByCallId[event.callId]?.output || "",
-        stdout: event.payload?.stdout || state.patchesByCallId[event.callId]?.stdout || "",
-        stderr: event.payload?.stderr || state.patchesByCallId[event.callId]?.stderr || "",
+        output: clampOutputText(
+          event.payload?.output || state.patchesByCallId[event.callId]?.output || "",
+          MAX_PATCH_OUTPUT_CHARS,
+        ),
+        stdout: clampOutputText(
+          event.payload?.stdout || state.patchesByCallId[event.callId]?.stdout || "",
+          MAX_PATCH_OUTPUT_CHARS,
+        ),
+        stderr: clampOutputText(
+          event.payload?.stderr || state.patchesByCallId[event.callId]?.stderr || "",
+          MAX_PATCH_OUTPUT_CHARS,
+        ),
         changes: event.payload?.changes || state.patchesByCallId[event.callId]?.changes || {},
         success:
           event.payload?.success ?? state.patchesByCallId[event.callId]?.success ?? null,

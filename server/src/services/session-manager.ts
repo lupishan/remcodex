@@ -20,6 +20,7 @@ import type {
 } from "../types/models";
 import { AppError } from "../utils/errors";
 import { createId } from "../utils/ids";
+import { appendCappedText } from "../utils/output-limits";
 import type { CodexJsonEvent } from "./codex-exec-runner";
 import { createCodexRunner, type CodexExecutionMode, type CodexRunner } from "./codex-runner";
 import {
@@ -54,6 +55,8 @@ interface CommandRuntimeState {
   cwd: string | null;
   stdout: string;
   stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
   started: boolean;
   completed: boolean;
 }
@@ -68,6 +71,7 @@ interface PatchRuntimeState {
 interface RunnerState {
   runner: CodexRunner;
   stopRequested: boolean;
+  transientSeqCursor: number;
   turnId: string;
   appTurnId: string | null;
   turnStarted: boolean;
@@ -103,6 +107,8 @@ interface SessionManagerOptions {
 function nowIso(): string {
   return new Date().toISOString();
 }
+
+const TRANSIENT_SEQ_STEP = 0.00001;
 
 function shouldAutotitleSession(title: string | null | undefined): boolean {
   const normalized = String(title || "").trim();
@@ -551,6 +557,7 @@ export class SessionManager {
     const runtime: RunnerState = {
       runner,
       stopRequested: false,
+      transientSeqCursor: this.options.eventStore.latestSeq(sessionId),
       turnId,
       appTurnId: null,
       turnStarted: false,
@@ -1328,6 +1335,8 @@ export class SessionManager {
       cwd: payload.cwd || null,
       stdout: "",
       stderr: "",
+      stdoutTruncated: false,
+      stderrTruncated: false,
       started: true,
       completed: false,
     });
@@ -1364,14 +1373,16 @@ export class SessionManager {
       return;
     }
 
-    if (stream === "stderr") {
-      current.stderr += textDelta;
-    } else {
-      current.stdout += textDelta;
+    const targetKey = stream === "stderr" ? "stderr" : "stdout";
+    const truncatedKey = stream === "stderr" ? "stderrTruncated" : "stdoutTruncated";
+    const capped = appendCappedText(current[targetKey], textDelta);
+    current[targetKey] = capped.nextText;
+    if (capped.truncated) {
+      current[truncatedKey] = true;
     }
     runtime.activeCommandCallId = callId;
 
-    this.appendEvent(sessionId, {
+    this.publishTransientEvent(sessionId, runtime, {
       type: "command.output.delta",
       turnId: runtime.turnId,
       messageId: null,
@@ -1414,6 +1425,11 @@ export class SessionManager {
       payload: {
         command: payload.command || current.command,
         cwd: payload.cwd || current.cwd,
+        stdout: current.stdout || null,
+        stderr: current.stderr || null,
+        aggregatedOutput: current.stdout || current.stderr || null,
+        stdoutTruncated: current.stdoutTruncated || undefined,
+        stderrTruncated: current.stderrTruncated || undefined,
         status: payload.status || (payload.exitCode === 0 ? "completed" : "failed"),
         exitCode: payload.exitCode ?? null,
         durationMs: payload.durationMs ?? null,
@@ -1674,8 +1690,26 @@ export class SessionManager {
 
   private appendEvent(sessionId: string, input: EventInsertInput) {
     const event = this.options.eventStore.append(sessionId, input);
+    const runtime = this.runners.get(sessionId);
+    if (runtime) {
+      runtime.transientSeqCursor = Math.max(runtime.transientSeqCursor, Number(event.seq || 0));
+    }
     this.touchSession(sessionId);
     return event;
+  }
+
+  private publishTransientEvent(
+    sessionId: string,
+    runtime: RunnerState,
+    input: EventInsertInput,
+  ) {
+    runtime.transientSeqCursor =
+      Math.round((runtime.transientSeqCursor + TRANSIENT_SEQ_STEP) * 100000) / 100000;
+    return this.options.eventStore.publishTransient(
+      sessionId,
+      input,
+      runtime.transientSeqCursor,
+    );
   }
 
   private touchSession(sessionId: string): void {

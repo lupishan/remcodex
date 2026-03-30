@@ -11,6 +11,7 @@ import type {
 } from "../types/models";
 import { AppError } from "../utils/errors";
 import { createId } from "../utils/ids";
+import { capTextValue } from "../utils/output-limits";
 
 interface RolloutRecord {
   timestamp?: unknown;
@@ -699,22 +700,7 @@ function translateRolloutRecords(
             : `call_${index}`;
         const started = commandStarts.get(callId) || null;
         const parsed = parseExecOutput(payload.output);
-        if (parsed.outputText) {
-          appendSemantic(index, {
-            type: "command.output.delta",
-            turnId: currentTurnId,
-            messageId: null,
-            callId,
-            requestId: null,
-            phase: null,
-            stream: "stdout",
-            payload: {
-              stream: "stdout",
-              textDelta: parsed.outputText,
-            },
-            timestamp,
-          });
-        }
+        const cappedOutput = parsed.outputText ? capTextValue(parsed.outputText) : null;
         appendSemantic(index, {
           type: "command.end",
           turnId: currentTurnId,
@@ -726,6 +712,9 @@ function translateRolloutRecords(
           payload: {
             command: parsed.commandLine || started?.commandPayload.command || null,
             cwd: started?.commandPayload.cwd || null,
+            stdout: cappedOutput?.text || null,
+            aggregatedOutput: cappedOutput?.text || null,
+            stdoutTruncated: cappedOutput?.truncated || undefined,
             status:
               parsed.exitCode == null
                 ? "completed"
