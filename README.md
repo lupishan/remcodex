@@ -1,16 +1,15 @@
 # 🚀 RemCodex
 
-> Control your AI coding agent from anywhere.  
-> Built for Codex. Ready for more.
+> Remote control for Codex.  
+> From your browser and phone.
 
-Run Codex once on your computer.  
-Watch, approve, and control it from any device.
+Run Codex on one machine.  
+Monitor, approve, and control the same session from another.
 
 🌐 https://remcodex.com
 
-> Not a wrapper. Not a proxy.  
-> A real-time control layer for AI execution.  
-> Turns AI execution into a controllable system.
+> Not a remote desktop. Not a proxy.  
+> A local-first way to control Codex away from the terminal.
 
 ![RemCodex hero cover](docs/assets/hero-cover.png)
 
@@ -18,10 +17,10 @@ Watch, approve, and control it from any device.
 
 ## ✨ What is RemCodex?
 
-RemCodex is a **local-first control layer for Codex**.
+RemCodex is **remote control for Codex**.
 
-It turns AI execution into a **controllable system** —  
-visible, interruptible, and continuous.
+It lets you start Codex on one machine, then keep the same session visible,
+interruptible, and controllable from another.
 
 - 👀 See what the AI is doing — in real time
 - ✅ Approve or reject actions before execution
