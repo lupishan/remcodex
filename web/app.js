@@ -590,6 +590,7 @@ function getPendingApprovalFromTimelineState(timelineState) {
     .filter(
       (item) =>
         item?.status === "pending" &&
+        !isApprovalDismissed(sessionId, item?.requestId) &&
         !isApprovalSuppressed(sessionId, item?.requestId),
     )
     .sort((left, right) => Number(right?.seq || 0) - Number(left?.seq || 0))[0];
@@ -618,6 +619,7 @@ function resolveDetailPendingApproval(session, timelineState) {
 
   if (!timelinePending) {
     return sessionPending &&
+      !isApprovalDismissed(sessionId, sessionPending.requestId, sessionPending.callId) &&
       !isApprovalSuppressed(sessionId, sessionPending.requestId, sessionPending.callId)
       ? sessionPending
       : null;
@@ -650,6 +652,37 @@ function isApprovalSuppressed(sessionId, requestId, callId = "") {
   return true;
 }
 
+function getApprovalDismissalKey(sessionId, requestId) {
+  return `${String(sessionId || "").trim()}:${String(requestId || "").trim()}`;
+}
+
+function isApprovalDismissed(sessionId, requestId) {
+  const key = getApprovalDismissalKey(sessionId, requestId);
+  if (!key || key === ":") {
+    return false;
+  }
+  return Boolean(state.detail.dismissedApprovalKeys?.[key]);
+}
+
+function dismissApproval(sessionId, requestId) {
+  const key = getApprovalDismissalKey(sessionId, requestId);
+  if (!key || key === ":") {
+    return;
+  }
+  state.detail.dismissedApprovalKeys = {
+    ...(state.detail.dismissedApprovalKeys || {}),
+    [key]: true,
+  };
+}
+
+function isTerminalApprovalError(error) {
+  const message = messageOf(error);
+  return (
+    message === "Approval request not found." ||
+    message === "Approval request can no longer be resumed."
+  );
+}
+
 function clearResolvingApprovalState() {
   state.detail.resolvingApprovalRequestId = "";
   state.detail.resolvingApprovalSessionId = "";
@@ -668,7 +701,10 @@ function syncDetailPendingApproval(session = state.detail.session, timelineState
   const sessionPending = session?.pendingApproval || null;
   const timelinePending = timelineState?.approvalsByRequestId
     ? Object.values(timelineState.approvalsByRequestId).some(
-        (item) => item?.status === "pending" && isApprovalSuppressed(session?.sessionId, item?.requestId),
+        (item) =>
+          item?.status === "pending" &&
+          !isApprovalDismissed(session?.sessionId, item?.requestId) &&
+          isApprovalSuppressed(session?.sessionId, item?.requestId),
       )
     : false;
   const detailPending =
@@ -680,6 +716,7 @@ function syncDetailPendingApproval(session = state.detail.session, timelineState
     );
   const sessionStillPending =
     sessionPending &&
+    !isApprovalDismissed(session?.sessionId, sessionPending.requestId, sessionPending.callId) &&
     isApprovalSuppressed(session?.sessionId, sessionPending.requestId, sessionPending.callId);
 
   if (!timelinePending && !detailPending && !sessionStillPending) {
@@ -694,6 +731,20 @@ function mergeDetailTimelineRawEvents(nextRawEvents) {
     return;
   }
 
+  const activeSessionId = getActiveDetailSessionId();
+  if (!activeSessionId) {
+    return;
+  }
+
+  const filteredRawEvents = nextRawEvents.filter((rawEvent) => {
+    const eventSessionId = String(rawEvent?.sessionId || rawEvent?.session_id || "").trim();
+    return !eventSessionId || eventSessionId === activeSessionId;
+  });
+
+  if (filteredRawEvents.length === 0) {
+    return;
+  }
+
   const existingIds = new Set(state.detail.rawEvents.map((event) => event.id));
   const currentMaxSeq = state.detail.rawEvents.reduce(
     (maxSeq, event) => Math.max(maxSeq, Number(event?.seq || 0)),
@@ -702,7 +753,7 @@ function mergeDetailTimelineRawEvents(nextRawEvents) {
   const appended = [];
   let canApplyIncrementally = true;
 
-  nextRawEvents.forEach((rawEvent) => {
+  filteredRawEvents.forEach((rawEvent) => {
     if (!rawEvent?.id || existingIds.has(rawEvent.id)) {
       return;
     }
@@ -737,19 +788,41 @@ function mergeDetailTimelineRawEvents(nextRawEvents) {
   syncDetailPendingApproval(state.detail.session, state.detail.timelineState);
 }
 
+function getActiveDetailSessionId() {
+  return String(state.workspace.activeSessionId || state.detail.session?.sessionId || "").trim();
+}
+
+function isActiveDetailSession(sessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  return Boolean(normalizedSessionId) && getActiveDetailSessionId() === normalizedSessionId;
+}
+
 async function catchUpSessionEvents(sessionId, afterSeq) {
+  const normalizedSessionId = String(sessionId || "").trim();
   let nextAfter = Number(afterSeq || 0);
-  if (!nextAfter) {
+  if (!normalizedSessionId || !nextAfter || !isActiveDetailSession(normalizedSessionId)) {
     return;
   }
 
   for (let page = 0; page < 10; page += 1) {
-    const payload = await getSessionEvents(sessionId, {
+    if (!isActiveDetailSession(normalizedSessionId)) {
+      return;
+    }
+
+    const payload = await getSessionEvents(normalizedSessionId, {
       after: nextAfter,
       limit: 200,
     });
+    if (!isActiveDetailSession(normalizedSessionId)) {
+      return;
+    }
 
-    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const items = Array.isArray(payload?.items)
+      ? payload.items.filter((item) => {
+          const eventSessionId = String(item?.sessionId || item?.session_id || "").trim();
+          return !eventSessionId || eventSessionId === normalizedSessionId;
+        })
+      : [];
     if (items.length === 0) {
       return;
     }
@@ -1323,6 +1396,7 @@ const state = {
     codexStatus: null,
     codexQuota: null,
     pendingApproval: null,
+    dismissedApprovalKeys: {},
     resolvingApprovalRequestId: "",
     resolvingApprovalSessionId: "",
     resolvingApprovalCallId: "",
@@ -1344,6 +1418,7 @@ const state = {
     inspectDrawerOpen: false,
     inspectSelectionKey: "",
     renderTimerId: 0,
+    loadRequestId: 0,
     resumeSyncInFlight: false,
     lastResumeSyncAt: 0,
     ...DEFAULT_DETAIL_VIEW,
@@ -1366,6 +1441,7 @@ window.addEventListener("pageshow", () => {
 });
 
 function renderRoute() {
+  state.detail.loadRequestId = Number(state.detail.loadRequestId || 0) + 1;
   cleanupSocket();
   cleanupDetailClock();
   cleanupLiveResumeSync();
@@ -3045,30 +3121,50 @@ function renderSessionsList() {
 }
 
 async function renderSessionDetailPage(sessionId) {
-  state.workspace.activeSessionId = sessionId;
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+
+  const previousSessionId = String(state.detail.session?.sessionId || "").trim();
+  if (previousSessionId !== normalizedSessionId) {
+    state.detail.dismissedApprovalKeys = {};
+  }
+
+  state.workspace.activeSessionId = normalizedSessionId;
+  const loadRequestId = Number(state.detail.loadRequestId || 0) + 1;
+  state.detail.loadRequestId = loadRequestId;
+  const isStaleDetailLoad = () =>
+    state.detail.loadRequestId !== loadRequestId || state.workspace.activeSessionId !== normalizedSessionId;
   const mainSlot = document.querySelector("#workspace-main-slot");
   if (mainSlot) {
     mainSlot.innerHTML = loadingCard(t("workspace.loading.session"));
   } else {
     app.innerHTML = renderWorkspaceShell({
-      sidebarHtml: renderWorkspaceSidebar(sessionId),
+      sidebarHtml: renderWorkspaceSidebar(normalizedSessionId),
       mainHtml: loadingCard(t("workspace.loading.session")),
     });
     syncWorkspaceShellState();
     bindWorkspaceCreateDialogControls();
     bindWorkspaceImportDialogControls();
-    bindWorkspaceSidebarControls(sessionId);
+    bindWorkspaceSidebarControls(normalizedSessionId);
   }
 
   try {
-    await syncImportedSession(sessionId).catch(() => null);
+    await syncImportedSession(normalizedSessionId).catch(() => null);
+    if (isStaleDetailLoad()) {
+      return;
+    }
 
     const [session, eventData, uiOptionsResult, hostsResult] = await Promise.all([
-      getSession(sessionId),
-      loadInitialSessionEvents(sessionId),
+      getSession(normalizedSessionId),
+      loadInitialSessionEvents(normalizedSessionId),
       getCodexUiOptions().catch(() => null),
       getCodexHosts().catch(() => null),
     ]);
+    if (isStaleDetailLoad()) {
+      return;
+    }
 
     const uiOptions =
       uiOptionsResult &&
@@ -3078,6 +3174,14 @@ async function renderSessionDetailPage(sessionId) {
       uiOptionsResult.reasoningLevels.length > 0
         ? uiOptionsResult
         : CLIENT_FALLBACK_CODEX_UI_OPTIONS;
+    const codexStatus = await getCodexStatus({
+      sessionId: normalizedSessionId,
+      threadId: session.codexThreadId || "",
+      cwd: session.projectPath || "",
+    }).catch(() => null);
+    if (isStaleDetailLoad()) {
+      return;
+    }
 
     state.detail.session = session;
     replaceDetailTimelineRawEvents(eventData.items);
@@ -3121,12 +3225,8 @@ async function renderSessionDetailPage(sessionId) {
     state.detail.inspectDrawerOpen = false;
     state.detail.inspectSelectionKey = "";
     state.detail.optimisticSend = null;
-    state.detail.codexQuota = readCachedCodexQuota(sessionId);
-    state.detail.codexStatus = await getCodexStatus({
-      sessionId,
-      threadId: session.codexThreadId || "",
-      cwd: session.projectPath || "",
-    }).catch(() => null);
+    state.detail.codexQuota = readCachedCodexQuota(normalizedSessionId);
+    state.detail.codexStatus = codexStatus;
     state.socketState = "connecting";
 
     const detailQuery = parseHashRoute(window.location.hash || "").query || "";
@@ -3136,26 +3236,36 @@ async function renderSessionDetailPage(sessionId) {
     }
 
     renderSessionDetail();
-    attachSessionSocket(sessionId);
-    void catchUpSessionEvents(sessionId, state.detail.cursor)
+    if (isStaleDetailLoad()) {
+      return;
+    }
+
+    attachSessionSocket(normalizedSessionId);
+    void catchUpSessionEvents(normalizedSessionId, state.detail.cursor)
       .then(() => {
-        scheduleSessionDetailRender();
+        if (!isStaleDetailLoad()) {
+          scheduleSessionDetailRender();
+        }
       })
       .catch(() => null);
-    scheduleImportedSessionSync(sessionId);
+    scheduleImportedSessionSync(normalizedSessionId);
   } catch (error) {
+    if (isStaleDetailLoad()) {
+      return;
+    }
+
     const nextMainSlot = document.querySelector("#workspace-main-slot");
     if (nextMainSlot) {
       nextMainSlot.innerHTML = errorCard(messageOf(error));
     } else {
       app.innerHTML = renderWorkspaceShell({
-        sidebarHtml: renderWorkspaceSidebar(sessionId),
+        sidebarHtml: renderWorkspaceSidebar(normalizedSessionId),
         mainHtml: errorCard(messageOf(error)),
       });
       syncWorkspaceShellState();
       bindWorkspaceCreateDialogControls();
       bindWorkspaceImportDialogControls();
-      bindWorkspaceSidebarControls(sessionId);
+      bindWorkspaceSidebarControls(normalizedSessionId);
     }
   }
 }
@@ -3671,14 +3781,33 @@ function scheduleSessionDetailRender(options = {}) {
 }
 
 function attachSessionSocket(sessionId) {
-  state.ws = connectSessionSocket(sessionId, {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+
+  cleanupSocket();
+  const socket = connectSessionSocket(normalizedSessionId, {
     onStateChange(nextState) {
+      if (state.ws !== socket || !isActiveDetailSession(normalizedSessionId)) {
+        return;
+      }
+
       state.socketState = nextState;
       if (state.detail.session) {
         scheduleSessionDetailRender();
       }
     },
     onEvent(event) {
+      const eventSessionId = String(event?.sessionId || event?.session_id || "").trim();
+      if (
+        state.ws !== socket ||
+        !isActiveDetailSession(normalizedSessionId) ||
+        (eventSessionId && eventSessionId !== normalizedSessionId)
+      ) {
+        return;
+      }
+
       if (state.detail.session) {
         state.detail.session.updatedAt = new Date().toISOString();
         if (event.type === "turn.started") {
@@ -3702,12 +3831,12 @@ function attachSessionSocket(sessionId) {
           event.content.startsWith("Codex thread started: ")
         ) {
           state.detail.session.codexThreadId = event.content.slice("Codex thread started: ".length);
-          refreshCodexStatus(sessionId);
+          refreshCodexStatus(normalizedSessionId);
         }
       }
 
       if ((event.type === "token_count" || event.type === "codex.quota") && state.detail.session) {
-        setDetailCodexQuota(state.detail.session.sessionId, event.payload);
+        setDetailCodexQuota(normalizedSessionId, event.payload);
       }
 
       trackUnseenEvents([event]);
@@ -3716,6 +3845,7 @@ function attachSessionSocket(sessionId) {
       scheduleSessionDetailRender();
     },
   });
+  state.ws = socket;
 }
 
 async function refreshCodexStatus(sessionId) {
@@ -7121,10 +7251,24 @@ function bindPendingApprovalControls(sessionId) {
         await retrySessionApproval(sessionId, requestId, payload);
         await resumeActiveSessionDetail("approval-retry");
       } catch (error) {
-        state.detail.pendingApproval = previousPendingApproval;
-        if (state.detail.session?.sessionId === sessionId) {
-          state.detail.session.status = previousStatus;
-          state.detail.session.liveBusy = previousLiveBusy;
+        if (isTerminalApprovalError(error)) {
+          dismissApproval(sessionId, requestId);
+          state.detail.pendingApproval = null;
+          const refreshedSession = await getSession(sessionId).catch(() => null);
+          if (refreshedSession && state.detail.session?.sessionId === sessionId) {
+            state.detail.session = refreshedSession;
+            updateSessionListItem(refreshedSession);
+          } else if (state.detail.session?.sessionId === sessionId) {
+            state.detail.session.status = previousStatus;
+            state.detail.session.liveBusy = previousLiveBusy;
+          }
+          syncDetailPendingApproval(state.detail.session, state.detail.timelineState);
+        } else {
+          state.detail.pendingApproval = previousPendingApproval;
+          if (state.detail.session?.sessionId === sessionId) {
+            state.detail.session.status = previousStatus;
+            state.detail.session.liveBusy = previousLiveBusy;
+          }
         }
         scheduleSessionDetailRender({ immediate: true });
         showToast(messageOf(error));
@@ -7174,7 +7318,18 @@ function bindPendingApprovalControls(sessionId) {
         if (isApprovalSuppressed(sessionId, requestId, previousPendingApproval?.callId)) {
           clearResolvingApprovalState();
         }
-        state.detail.pendingApproval = previousPendingApproval;
+        if (isTerminalApprovalError(error)) {
+          dismissApproval(sessionId, requestId);
+          state.detail.pendingApproval = null;
+          const refreshedSession = await getSession(sessionId).catch(() => null);
+          if (refreshedSession && state.detail.session?.sessionId === sessionId) {
+            state.detail.session = refreshedSession;
+            updateSessionListItem(refreshedSession);
+          }
+          syncDetailPendingApproval(state.detail.session, state.detail.timelineState);
+        } else {
+          state.detail.pendingApproval = previousPendingApproval;
+        }
         showToast(messageOf(error));
         scheduleSessionDetailRender({ immediate: true });
       }
