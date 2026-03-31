@@ -1,6 +1,6 @@
 {
   "name": "remcodex",
-  "version": "0.1.0-beta.9",
+  "version": "0.1.0-beta.10",
   "description": "Control Codex from anywhere. Even on your phone.",
   "license": "MIT",
   "bin": {
