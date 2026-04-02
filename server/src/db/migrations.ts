@@ -1,7 +1,44 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { DatabaseClient } from "./client";
+
+function isPackageRoot(root: string): boolean {
+  return existsSync(path.join(root, "package.json")) && existsSync(path.join(root, "web", "index.html"));
+}
+
+function resolvePackageRoot(startDir = __dirname): string {
+  let current = path.resolve(startDir);
+
+  while (true) {
+    if (isPackageRoot(current)) {
+      return current;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+
+  return process.cwd();
+}
+
+function resolveSchemaFile(): string {
+  const packageRoot = resolvePackageRoot();
+  const candidates = [
+    path.join(packageRoot, "server", "src", "db", "schema.sql"),
+    path.join(packageRoot, "dist", "server", "src", "db", "schema.sql"),
+  ];
+
+  const resolved = candidates.find((candidate) => existsSync(candidate));
+  if (!resolved) {
+    throw new Error(`Database schema file not found. Tried: ${candidates.join(", ")}`);
+  }
+
+  return resolved;
+}
 
 function ensureColumn(
   db: DatabaseClient,
@@ -18,7 +55,7 @@ function ensureColumn(
 }
 
 export function runMigrations(db: DatabaseClient): void {
-  const schemaFile = path.join(process.cwd(), "server", "src", "db", "schema.sql");
+  const schemaFile = resolveSchemaFile();
   const schema = readFileSync(schemaFile, "utf8");
   db.exec(schema);
 

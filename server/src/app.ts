@@ -1,6 +1,5 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import http from "node:http";
-import { homedir } from "node:os";
 import path from "node:path";
 
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -18,6 +17,7 @@ import { ProjectManager } from "./services/project-manager";
 import { SessionManager } from "./services/session-manager";
 import { SessionTimelineService } from "./services/session-timeline-service";
 import type { CodexExecutionMode } from "./services/codex-runner";
+import { resolveDefaultDatabasePath, resolvePackageRoot } from "./utils/runtime-paths";
 import { resolveExecutable } from "./utils/command";
 import { isAppError } from "./utils/errors";
 
@@ -56,40 +56,9 @@ interface BuiltRemCodexServer {
   logStartup: boolean;
 }
 
-function isPackageRoot(root: string): boolean {
-  return (
-    existsSync(path.join(root, "package.json")) &&
-    existsSync(path.join(root, "web", "index.html"))
-  );
-}
-
-export function resolvePackageRoot(startDir = __dirname): string {
-  let current = path.resolve(startDir);
-
-  while (true) {
-    if (isPackageRoot(current)) {
-      return current;
-    }
-
-    const parent = path.dirname(current);
-    if (parent === current) {
-      break;
-    }
-    current = parent;
-  }
-
-  return process.cwd();
-}
-
-export function resolveDefaultDatabasePath(): string {
-  return path.join(homedir(), ".remcodex", "remcodex.db");
-}
-
-export const DEFAULT_PORT = 18840;
-
 function buildRemCodexServer(options: RemCodexServerOptions = {}): BuiltRemCodexServer {
   const repoRoot = options.repoRoot ? path.resolve(options.repoRoot) : resolvePackageRoot();
-  const port = options.port ?? Number.parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
+  const port = options.port ?? Number.parseInt(process.env.PORT ?? "18840", 10);
   const databasePath =
     options.databasePath ??
     process.env.DATABASE_PATH ??

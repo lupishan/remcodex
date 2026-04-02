@@ -6,7 +6,7 @@ import { homedir, networkInterfaces } from "node:os";
 import path from "node:path";
 
 import type { CodexExecutionMode } from "./services/codex-runner";
-import { DEFAULT_PORT, startRemCodexServer, resolveDefaultDatabasePath, resolvePackageRoot } from "./app";
+import { resolveDefaultDatabasePath, resolvePackageRoot } from "./utils/runtime-paths";
 import { resolveExecutable } from "./utils/command";
 
 interface CliFlags {
@@ -142,6 +142,20 @@ function usage() {
   print("  --no-open               Do not open a browser automatically");
 }
 
+function formatNativeModuleError(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.includes("NODE_MODULE_VERSION")) {
+    return null;
+  }
+
+  return [
+    "Native module failed to load. This usually means RemCodex was installed with a different Node.js version.",
+    `Current Node: ${process.version}`,
+    "Reinstall remcodex with the same Node.js version you will use to run it.",
+    "If you use nvm/fnm/asdf, switch to the target Node version first, then reinstall.",
+  ].join("\n");
+}
+
 async function runDoctor(flags: CliFlags): Promise<number> {
   const version = readPackageVersion();
   const rawCodexCommand = process.env.CODEX_COMMAND ?? "codex";
@@ -186,6 +200,18 @@ async function runDoctor(flags: CliFlags): Promise<number> {
 }
 
 async function runStart(flags: CliFlags): Promise<number> {
+  let startRemCodexServer: typeof import("./app").startRemCodexServer;
+  try {
+    ({ startRemCodexServer } = await import("./app"));
+  } catch (error) {
+    const nativeModuleMessage = formatNativeModuleError(error);
+    if (nativeModuleMessage) {
+      printError(nativeModuleMessage);
+      return 1;
+    }
+    throw error;
+  }
+
   const version = readPackageVersion();
   const rawCodexCommand = process.env.CODEX_COMMAND ?? "codex";
   const codex = commandExists(rawCodexCommand);
@@ -196,7 +222,7 @@ async function runStart(flags: CliFlags): Promise<number> {
     return 1;
   }
 
-  const preferredPort = flags.port ?? Number.parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
+  const preferredPort = flags.port ?? Number.parseInt(process.env.PORT ?? "18840", 10);
   const codexMode: CodexExecutionMode = process.env.CODEX_MODE === "exec-json" ? "exec-json" : "app-server";
 
   let started = null as Awaited<ReturnType<typeof startRemCodexServer>> | null;
