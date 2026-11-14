@@ -10,12 +10,16 @@ export function createMessageRouter(
   speechToText: SpeechToTextService,
 ): Router {
   const router = Router({ mergeParams: true });
+  let transcriptionBusy = false;
 
   router.post(
     "/voice",
     express.raw({ type: ["audio/*", "application/octet-stream"], limit: "25mb" }),
-    (request, response, next) => {
+    async (request, response, next) => {
+      let ownsTranscription = false;
       try {
+        if (transcriptionBusy) throw new AppError(429, "Another voice note is being transcribed. Try again shortly.");
+        transcriptionBusy = true; ownsTranscription = true;
         if (!speechToText.isAvailable()) {
           throw new AppError(
             503,
@@ -33,7 +37,7 @@ export function createMessageRouter(
           reasoningEffort: request.header("x-codex-reasoning") ?? undefined,
           profile: request.header("x-codex-profile") ?? undefined,
         });
-        const transcription = speechToText.transcribeDetailed(
+        const transcription = await speechToText.transcribeDetailed(
           request.body,
           request.header("content-type"),
           request.header("x-filename"),
@@ -47,7 +51,7 @@ export function createMessageRouter(
         });
       } catch (error) {
         next(error);
-      }
+      } finally { if (ownsTranscription) transcriptionBusy = false; }
     },
   );
 

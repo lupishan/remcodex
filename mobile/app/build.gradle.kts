@@ -15,6 +15,7 @@ val releaseVersionCode = releaseProperties.getProperty("versionCode")?.toIntOrNu
     ?: error("mobile/version.properties must define a positive versionCode")
 
 android {
+    buildFeatures { buildConfig = true }
     namespace = "com.chiliahedron.remcodex"
     compileSdk = 34
 
@@ -27,7 +28,9 @@ android {
     }
 
     buildTypes {
+        debug { manifestPlaceholders["usesCleartextTraffic"] = "true" }
         release {
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
             // Release APKs are intentionally unsigned. Signing is a separate, protected F-Droid step.
             signingConfig = null
             isMinifyEnabled = false

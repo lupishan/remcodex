@@ -18,6 +18,7 @@ import androidx.activity.enableEdgeToEdge
 class MainActivity : ComponentActivity() {
     private lateinit var webView: WebView
     private lateinit var errorView: TextView
+    private var trustedOrigin: String? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -31,6 +32,11 @@ class MainActivity : ComponentActivity() {
             settings.loadsImagesAutomatically = true
             settings.allowFileAccess = false
             webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    val uri = request.url
+                    return !isAllowedServer(uri) || origin(uri) != trustedOrigin
+                }
+
                 override fun onPageFinished(view: WebView, url: String) {
                     errorView.visibility = View.GONE
                     webView.visibility = View.VISIBLE
@@ -72,9 +78,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadServer(uri: Uri) {
+        if (!isAllowedServer(uri)) { showLoadError(); return }
+        trustedOrigin = origin(uri)
         webView.visibility = View.VISIBLE
         webView.loadUrl(uri.toString())
     }
+
+    private fun origin(uri: Uri): String = "${uri.scheme}://${uri.host}:${uri.port}"
+
+    private fun isAllowedServer(uri: Uri): Boolean = uri.host != null && uri.userInfo == null &&
+        (uri.scheme == "https" || (BuildConfig.DEBUG && uri.scheme == "http"))
 
     private fun resolveServerUri(sourceIntent: Intent): Uri {
         val configuredUrl = sourceIntent.getStringExtra(EXTRA_SERVER_URL)

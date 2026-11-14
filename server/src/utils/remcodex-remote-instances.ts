@@ -8,8 +8,9 @@ const NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const CREDENTIAL_REF = /^[A-Z][A-Z0-9_]{0,127}$/;
 
 function rejectPrivateHost(hostname: string): void {
-  const host = hostname.toLowerCase().replace(/\.$/, "");
+  const host = hostname.toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
   if (
+    host.includes(":") || // IPv6 targets require a separately reviewed explicit trust policy.
     host === "localhost" ||
     host === "ip6-localhost" ||
     host === "0.0.0.0" ||

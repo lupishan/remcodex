@@ -14,12 +14,11 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RemcodexTuiTests(unittest.TestCase):
-    def test_app_server_command_matches_panoply_wrapper(self):
+    def test_app_server_command_preserves_approval_defaults(self):
         self.assertEqual(
             MODULE.build_app_server_command("codex", "unix:///tmp/codex.sock"),
             [
                 "codex",
-                "--dangerously-bypass-approvals-and-sandbox",
                 "app-server",
                 "--listen",
                 "unix:///tmp/codex.sock",
@@ -31,7 +30,6 @@ class RemcodexTuiTests(unittest.TestCase):
             MODULE.build_tui_command("codex", "unix:///tmp/codex.sock"),
             [
                 "codex",
-                "--dangerously-bypass-approvals-and-sandbox",
                 "--remote",
                 "unix:///tmp/codex.sock",
             ],

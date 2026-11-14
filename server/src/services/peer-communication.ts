@@ -91,12 +91,14 @@ export class PeerCommunicationService {
   ) {
     if (adminToken?.trim()) {
       const token = adminToken.trim();
-      this.db.prepare(`INSERT OR IGNORE INTO peer_credentials (id, worker_id, session_id, token_hash, scopes_json, lease_expires_at, last_seen_at) VALUES ('peer-admin', 'administrator', 'server', ?, ?, ?, ?)`).run(
+      this.db.prepare(`INSERT OR IGNORE INTO peer_credentials (id, worker_id, session_id, token_hash, scopes_json, lease_expires_at, last_seen_at) VALUES ('peer-admin', 'administrator', 'server', ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, scopes_json = excluded.scopes_json, status = 'active', lease_expires_at = excluded.lease_expires_at, last_seen_at = excluded.last_seen_at, dormant_at = NULL`).run(
         hashToken(token),
         JSON.stringify([PEER_SCOPES.adminGrant, PEER_SCOPES.adminRevoke, PEER_SCOPES.adminAudit, PEER_SCOPES.adminDigest]),
         new Date(this.clock().getTime() + 365 * 24 * 60 * 60 * 1_000).toISOString(),
         this.clock().toISOString(),
       );
+    } else {
+      this.db.prepare("DELETE FROM peer_credentials WHERE id = 'peer-admin'").run();
     }
   }
 

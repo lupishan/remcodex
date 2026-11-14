@@ -25,6 +25,14 @@ export function buildCodexChildEnvironment(
   peerCredential?: string | null,
 ): NodeJS.ProcessEnv {
   const env = { ...process.env };
+  const refs: string[] = [];
+  try {
+    const instances: unknown = JSON.parse(env.REMCODEX_REMOTE_INSTANCES || "[]");
+    if (Array.isArray(instances)) {
+      for (const instance of instances) if (typeof instance?.credentialRef === "string") refs.push(instance.credentialRef);
+    }
+  } catch { /* Invalid instance configuration is rejected at startup. */ }
+  for (const key of Object.keys(env)) if (key.startsWith("REMCODEX_") || refs.includes(key)) delete env[key];
   delete env.REMCODEX_PEER_ADMIN_TOKEN;
   delete env.REMCODEX_MCP_API_TOKEN;
   delete env.REMCODEX_PEER_TOKEN;

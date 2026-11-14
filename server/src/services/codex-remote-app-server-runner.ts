@@ -8,27 +8,15 @@ import { buildCodexMcpToolPolicyOverrides } from "../utils/codex-launch";
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 }
 
-interface McpServerStatusList {
-  data?: Array<{ name?: unknown }>;
-  nextCursor?: unknown;
-}
-
-export const REMOTE_APPROVAL_POLICY = "never";
-export const REMOTE_SANDBOX_MODE = "danger-full-access";
-
-export function applyMcpAutoApprovalOverrides(
-  config: Record<string, unknown>,
-  serverNames: string[],
-): void {
-  for (const rawName of serverNames) {
-    const name = rawName.trim();
-    if (name) {
-      config[`mcp_servers.${name}.default_tools_approval_mode`] = "approve";
-    }
-  }
-}
+export const REMOTE_APPROVAL_POLICY = "on-request";
+export const REMOTE_SANDBOX_MODE = "workspace-write";
+const APPROVAL_METHODS = new Set([
+  "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
+  "item/permissions/requestApproval", "execCommandApproval", "applyPatchApproval",
+]);
 
 function connectWebSocket(endpoint: string): WebSocket {
   if (endpoint.startsWith("ws+unix://") || endpoint.startsWith("unix://")) {
@@ -37,12 +25,12 @@ function connectWebSocket(endpoint: string): WebSocket {
     const separator = value.lastIndexOf(":/");
     const socketPath = separator >= 0 ? value.slice(0, separator) : value;
     return new WebSocket("ws://localhost/", {
-      perMessageDeflate: false,
+      perMessageDeflate: false, handshakeTimeout: 5000, maxPayload: 4 * 1024 * 1024,
       createConnection: () => net.createConnection({ path: socketPath }),
     });
   }
 
-  return new WebSocket(endpoint, { perMessageDeflate: false });
+  return new WebSocket(endpoint, { perMessageDeflate: false, handshakeTimeout: 5000, maxPayload: 4 * 1024 * 1024 });
 }
 
 export class CodexRemoteAppServerRunner implements CodexRunner {
@@ -82,7 +70,7 @@ export class CodexRemoteAppServerRunner implements CodexRunner {
       this.socket = null;
       if (!this.finalized) {
         this.finalized = true;
-        this.exitListeners.forEach((listener) => listener(0));
+        this.exitListeners.forEach((listener) => listener(1));
       }
     });
 
@@ -93,13 +81,17 @@ export class CodexRemoteAppServerRunner implements CodexRunner {
     if (!this.socket) {
       return;
     }
-    if (this.currentTurnId) {
-      void this.request("turn/interrupt", {
-        threadId: this.currentThreadId,
-        turnId: this.currentTurnId,
-      }).catch(() => undefined);
+    if (!this.currentTurnId) {
+      this.emitText("stderr", "Cannot confirm an interrupt before a turn has started.");
+      this.finish(1);
+      return;
     }
-    this.socket.close();
+    void this.request("turn/interrupt", {
+      threadId: this.currentThreadId, turnId: this.currentTurnId,
+    }).then(() => this.finish(0)).catch((error) => {
+      this.emitText("stderr", `Interrupt was not confirmed: ${this.messageOf(error)}`);
+      this.finish(1);
+    });
   }
 
   respond(requestId: number, result: unknown): boolean {
@@ -136,11 +128,8 @@ export class CodexRemoteAppServerRunner implements CodexRunner {
     });
     this.notify("initialized");
 
-    // Panoply's interactive app-server wrapper is intentionally launched with
-    // Codex's dangerous bypass flag. Preserve that unattended behavior when
-    // RemCodex resumes the same thread through a second client connection.
     const approvalPolicy = REMOTE_APPROVAL_POLICY;
-    const sandboxMode = REMOTE_SANDBOX_MODE;
+    const sandboxMode = launch?.sandbox ?? REMOTE_SANDBOX_MODE;
     const config = await this.buildConfig(launch);
     const result = await this.request("thread/resume", {
       threadId,
@@ -151,14 +140,16 @@ export class CodexRemoteAppServerRunner implements CodexRunner {
       persistExtendedHistory: true,
     }) as { thread?: { id?: string } };
     const resolvedThreadId = result.thread?.id ?? threadId;
-    await this.request("turn/start", {
+    this.currentThreadId = resolvedThreadId;
+    const started = await this.request("turn/start", {
       threadId: resolvedThreadId,
       input: [{ type: "text", text: prompt, text_elements: [] }],
       approvalPolicy,
       sandboxPolicy: this.buildSandboxPolicy(sandboxMode, launch),
       model: launch?.model ?? null,
       effort: launch?.reasoningEffort ?? null,
-    });
+    }) as { turn?: { id?: string } };
+    this.currentTurnId = started.turn?.id ?? this.currentTurnId;
   }
 
   private async buildConfig(launch: CodexExecLaunchInput | undefined): Promise<Record<string, unknown> | null> {
@@ -171,20 +162,6 @@ export class CodexRemoteAppServerRunner implements CodexRunner {
         : undefined,
     ));
     if (launch?.profile) config.profile = launch.profile;
-
-    let cursor: string | null = null;
-    do {
-      const result = await this.request("mcpServerStatus/list", {
-        cursor,
-        limit: 100,
-        detail: "toolsAndAuthOnly",
-      }) as McpServerStatusList;
-      applyMcpAutoApprovalOverrides(
-        config,
-        (result.data ?? []).flatMap((server) => typeof server.name === "string" ? [server.name] : []),
-      );
-      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : null;
-    } while (cursor);
 
     return Object.keys(config).length ? config : null;
   }
@@ -205,8 +182,16 @@ export class CodexRemoteAppServerRunner implements CodexRunner {
   private request(method: string, params?: unknown): Promise<unknown> {
     const id = this.requestId++;
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject });
-      this.write({ jsonrpc: "2.0", id, method, params });
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`Remote app-server timed out: ${method}`));
+      }, 10_000);
+      this.pendingRequests.set(id, { resolve, reject, timer });
+      try { this.write({ jsonrpc: "2.0", id, method, params }); }
+      catch (error) {
+        clearTimeout(timer); this.pendingRequests.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -234,25 +219,26 @@ export class CodexRemoteAppServerRunner implements CodexRunner {
       const pending = this.pendingRequests.get(message.id);
       if (!pending) return;
       this.pendingRequests.delete(message.id);
+      clearTimeout(pending.timer);
       if (message.error) pending.reject(new Error(JSON.stringify(message.error)));
       else pending.resolve(message.result);
       return;
     }
 
     if (typeof message.method !== "string") return;
+    const params = message.params as Record<string, unknown> | undefined;
+    // Shared servers may broadcast other threads. Never deliver those to this session.
+    if (!params || params.threadId !== this.currentThreadId) return;
+    const turn = params.turn as Record<string, unknown> | undefined;
+    const turnId = typeof params.turnId === "string" ? params.turnId : typeof turn?.id === "string" ? turn.id : null;
+    if (turnId && this.currentTurnId && turnId !== this.currentTurnId) return;
+    if (message.method === "turn/started") this.currentTurnId = turnId;
     this.jsonListeners.forEach((listener) => listener(message));
     if (typeof message.id === "number") {
-      this.respondUnsupportedRequest(message.id, message.method);
+      if (!APPROVAL_METHODS.has(message.method)) this.respondUnsupportedRequest(message.id, message.method);
       return;
     }
-    if (message.method === "turn/started") {
-      const params = message.params as Record<string, unknown> | undefined;
-      const turn = params?.turn as Record<string, unknown> | undefined;
-      this.currentTurnId = typeof turn?.id === "string" ? turn.id : null;
-    }
-    if (message.method === "turn/completed") {
-      const params = message.params as Record<string, unknown> | undefined;
-      const turn = params?.turn as Record<string, unknown> | undefined;
+    if (message.method === "turn/completed" && turnId && turnId === this.currentTurnId) {
       this.finish(turn?.status === "failed" ? 1 : 0);
     }
   }
@@ -264,12 +250,13 @@ export class CodexRemoteAppServerRunner implements CodexRunner {
   private finish(exitCode: number): void {
     if (this.finalized) return;
     this.finalized = true;
+    this.rejectPendingRequests(new Error("Remote turn finished."));
     this.exitListeners.forEach((listener) => listener(exitCode));
     this.socket?.close();
   }
 
   private rejectPendingRequests(error: Error): void {
-    for (const pending of this.pendingRequests.values()) pending.reject(error);
+    for (const pending of this.pendingRequests.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pendingRequests.clear();
   }
 

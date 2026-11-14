@@ -14,7 +14,19 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-BYPASS_FLAGS = ["--dangerously-bypass-approvals-and-sandbox"]
+BYPASS_FLAGS: list[str] = []
+
+
+def child_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    try:
+        refs = [item.get("credentialRef") for item in json.loads(env.get("REMCODEX_REMOTE_INSTANCES", "[]"))]
+    except (ValueError, TypeError, AttributeError):
+        refs = []
+    for key in list(env):
+        if key.startswith("REMCODEX_") or key in refs:
+            env.pop(key, None)
+    return env
 
 
 def resolve_codex(command: str) -> str:
@@ -82,7 +94,9 @@ def terminate(process: subprocess.Popen[bytes] | None) -> None:
 
 
 def run_interactive(codex: str, registry_dir: Path, socket_timeout: float) -> int:
-    registry_dir.mkdir(parents=True, exist_ok=True)
+    registry_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if registry_dir.is_symlink() or registry_dir.stat().st_uid != os.getuid():
+        raise RuntimeError("App-server registry must be owned by the current user.")
     registry_dir.chmod(0o700)
 
     instance_id = f"codex-{os.getpid()}-{time.time_ns() % 1_000_000_000}"
@@ -100,10 +114,11 @@ def run_interactive(codex: str, registry_dir: Path, socket_timeout: float) -> in
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
+                env=child_environment(),
             )
             wait_for_socket(socket_path, app_server, socket_timeout)
             write_registry_metadata(metadata_path, instance_id, endpoint, socket_path, app_server)
-            tui = subprocess.Popen(build_tui_command(codex, endpoint))
+            tui = subprocess.Popen(build_tui_command(codex, endpoint), env=child_environment())
             return tui.wait()
         except KeyboardInterrupt:
             return 130
@@ -134,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--registry-dir",
         default=os.environ.get(
             "CODEX_APP_SERVER_REGISTRY_DIR",
-            str(Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "codex-app-servers"),
+            str(Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/remcodex-{os.getuid()}")) / "codex-app-servers"),
         ),
         help="App-server registry directory.",
     )

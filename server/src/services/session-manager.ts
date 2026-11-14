@@ -302,7 +302,11 @@ export class SessionManager {
       .map((session) => hydrateSession(session) as unknown as SessionListRecord);
   }
 
-  findSessionByProjectPath(projectPath: string): SessionRecord | null {
+  getDefaultAgentEnvironment(): string | null {
+    return this.options.agentEnvironmentRegistry?.defaultEnvironment ?? null;
+  }
+
+  findSessionByProjectPath(projectPath: string, agentEnvironment?: string | null): SessionRecord | null {
     const trimmedPath = projectPath.trim();
     if (!trimmedPath) {
       return null;
@@ -321,11 +325,12 @@ export class SessionManager {
             FROM sessions
             WHERE project_id = ?
               AND status NOT IN ('completed', 'failed')
+              AND (? IS NULL OR COALESCE(agent_environment, '') = ?)
             ORDER BY updated_at DESC
             LIMIT 1
           `,
         )
-        .get(project.id) as Record<string, unknown> | undefined
+        .get(project.id, agentEnvironment === undefined ? null : agentEnvironment ?? "", agentEnvironment ?? "") as Record<string, unknown> | undefined
     );
     return row ? (hydrateSession(row) as unknown as SessionRecord) : null;
   }
@@ -430,6 +435,13 @@ export class SessionManager {
         throw new AppError(400, "A session cannot be its own parent.");
       }
 
+      const visited = new Set([session.id]);
+      let ancestorId: string | null = requestedParentId;
+      while (ancestorId) {
+        if (visited.has(ancestorId)) throw new AppError(400, "Parent relationship would create a cycle.");
+        visited.add(ancestorId);
+        ancestorId = this.getSession(ancestorId)?.parent_session_id ?? null;
+      }
       const parent = this.getSession(requestedParentId);
       if (!parent) {
         throw new AppError(404, "Parent session not found.");
@@ -620,6 +632,9 @@ export class SessionManager {
     const project = this.options.projectManager.getProject(session.project_id);
     if (!project) {
       throw new AppError(404, "Project not found for session.");
+    }
+    if (session.app_server_endpoint && process.env.REMCODEX_ENABLE_TUI_CONTROL !== "1") {
+      throw new AppError(409, "Interactive TUI control is experimental. Set REMCODEX_ENABLE_TUI_CONTROL=1 to enable it.");
     }
     const userMessage = composeMessageContentWithStartingPrompt(message, session.starting_prompt);
     const runtimePrompt = normalizeDemoPrompt(project.path, userMessage);

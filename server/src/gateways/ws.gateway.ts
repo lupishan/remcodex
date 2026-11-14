@@ -6,6 +6,7 @@ import { EventStore } from "../services/event-store";
 import { SessionManager } from "../services/session-manager";
 
 interface GatewayOptions {
+  authorize?: (request: http.IncomingMessage) => boolean;
   eventStore: EventStore;
   sessionManager: SessionManager;
 }
@@ -22,6 +23,11 @@ export function registerSessionGateway(
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (request, socket, head) => {
+    if (options.authorize && !options.authorize(request)) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
     const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
     const matched = url.pathname.match(/^\/ws\/sessions\/([^/]+)$/);
     if (!matched) {

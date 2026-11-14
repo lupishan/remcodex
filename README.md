@@ -92,9 +92,15 @@ Then open:
 
 http://127.0.0.1:18840
 
-Access from another device:
+To connect from a phone or another device, explicitly enable authenticated LAN access:
 
-http://<your-ip>:18840
+```bash
+REMCODEX_HOST=0.0.0.0 REMCODEX_API_TOKEN="<long-random-secret>" npx remcodex
+```
+
+Open `http://<your-ip>:18840` and enter the token. Without these settings,
+RemCodex listens on localhost only. Use HTTPS through a reverse proxy when
+accessing it over untrusted networks.
 
 > Runs entirely on your local machine. No cloud, no data upload.
 
@@ -162,9 +168,10 @@ Instead of raw terminal logs, you get a structured, visual timeline you can foll
 When configured by Panoply, a bare interactive `codex` command starts a Unix-socket
 app-server and records its endpoint under `$XDG_RUNTIME_DIR/codex-app-servers`.
 RemCodex discovers those endpoints, imports their thread history, and can send
-follow-up turns through the same app-server. Remote follow-up turns preserve the
-unattended dangerous-bypass policy and auto-approve tools from discovered MCP
-servers. Explicit Codex subcommands continue to pass directly to the underlying
+follow-up turns through the same app-server. Remote follow-up turns retain `on-request` approvals and default to a
+`workspace-write` sandbox; MCP tools are not automatically approved. Live TUI
+control is experimental and disabled unless `REMCODEX_ENABLE_TUI_CONTROL=1` is
+set. Discovery/history viewing remains available without enabling execution. Explicit Codex subcommands continue to pass directly to the underlying
 CLI.
 
 The workspace sidebar's `+ New session` control also remembers a default
@@ -562,7 +569,7 @@ Result:
 
 - no polished installer yet
 - no desktop packaging
-- no production-grade auth
+- single-owner token authentication; no multi-user roles
 - no release pipeline
 
 If you're comfortable running a local Node app —  
@@ -573,3 +580,30 @@ you can use it today.
 ## 📄 License
 
 MIT License
+
+### Upstream integration safeguards
+
+This integration retains the contributor's history and adds control-plane
+hardening before enabling the expanded features. It does not publish a new npm
+release or an Android binary.
+
+- `REMCODEX_API_TOKEN` protects browser/REST/WebSocket access. Keep it distinct
+  from `REMCODEX_MCP_API_TOKEN`, which grants full management access to MCP tools,
+  including sending prompts and resolving approvals. Give the MCP token only to
+  trusted administrator clients; it is not a read-only worker token.
+- Interactive TUI control requires `REMCODEX_ENABLE_TUI_CONTROL=1`. It needs
+  real-Codex-version/device validation before being made a default feature.
+- Cross-instance MCP requires `REMCODEX_ENABLE_REMOTE_MCP=1`. Use the
+  `call-remote-tool` tool with `instanceName`, `toolName`, and `arguments`.
+  Targets must be administrator-controlled HTTPS endpoints. IPv6/private literal
+  targets are rejected; DNS-based private routing is not a supported security
+  boundary. Proxy requests reject redirects, have deadlines, bound response size,
+  preserve SSE framing, and close their remote sessions.
+- Peer credentials are injected into workers only when a peer administrator
+  token is configured. Configured remote credentials and RemCodex server
+  settings are removed from child environments. These are capability boundaries,
+  not OS isolation between processes running as the same user.
+- Voice transcription runs asynchronously, one request at a time, with a
+  60-second subprocess timeout. Optional Android release builds require HTTPS;
+  HTTP is permitted only in debug builds. Android signing and device acceptance
+  are separate work, and the Android tree is not part of the npm package.

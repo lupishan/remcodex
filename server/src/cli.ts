@@ -78,7 +78,8 @@ function parseFlags(argv: string[]): CliFlags {
 }
 
 function getLanAddresses(): string[] {
-  const interfaces = networkInterfaces();
+  let interfaces: ReturnType<typeof networkInterfaces>;
+  try { interfaces = networkInterfaces(); } catch { return []; }
   const addresses: string[] = [];
 
   Object.values(interfaces).forEach((entries) => {
@@ -271,7 +272,8 @@ async function runStart(flags: CliFlags): Promise<number> {
   }
 
   const localUrl = `http://127.0.0.1:${activePort}`;
-  const lanUrls = getLanAddresses().map((address) => `http://${address}:${activePort}`);
+  const lanEnabled = Boolean(process.env.REMCODEX_HOST && !["127.0.0.1", "localhost", "::1"].includes(process.env.REMCODEX_HOST));
+  const lanUrls = lanEnabled ? getLanAddresses().map((address) => `http://${address}:${activePort}`) : [];
 
   print(`RemCodex v${version}`);
   print("");
@@ -285,9 +287,11 @@ async function runStart(flags: CliFlags): Promise<number> {
   if (publicBaseUrl) {
     print(`Public: ${publicBaseUrl}`);
   }
-  lanUrls.forEach((url) => {
-    print(`LAN:   ${url}`);
-  });
+  if (lanEnabled) {
+    lanUrls.forEach((url) => print(`LAN:   ${url}`));
+  } else {
+    print("Phone access: set REMCODEX_HOST=0.0.0.0 and REMCODEX_API_TOKEN, then restart.");
+  }
 
   if (!flags.noOpen) {
     openBrowser(localUrl);

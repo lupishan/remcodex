@@ -98,19 +98,19 @@ test("session launch passes only the scoped worker credential to an isolated chi
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "remcodex-peer-isolated-launch-"));
   const previousAdminToken = process.env.REMCODEX_PEER_ADMIN_TOKEN;
   const previousRegistryPath = process.env.CODEX_AGENT_ENVIRONMENTS_PATH;
-  const previousObservedPath = process.env.REMCODEX_TEST_OBSERVED;
+  const previousObservedPath = process.env.TEST_OBSERVED_PATH;
   const scriptPath = path.join(root, "fake-codex.sh");
   const observedPath = path.join(root, "observed.txt");
   fs.writeFileSync(scriptPath, [
     "#!/bin/sh",
-    'if [ -n "$REMCODEX_PEER_TOKEN" ]; then printf "worker-present\\n" >> "$REMCODEX_TEST_OBSERVED"; else printf "worker-absent\\n" >> "$REMCODEX_TEST_OBSERVED"; fi',
-    'if [ -n "$REMCODEX_PEER_ADMIN_TOKEN" ]; then printf "admin-present\\n" >> "$REMCODEX_TEST_OBSERVED"; else printf "admin-absent\\n" >> "$REMCODEX_TEST_OBSERVED"; fi',
+    'if [ -n "$REMCODEX_PEER_TOKEN" ]; then printf "worker-present\\n" >> "$TEST_OBSERVED_PATH"; else printf "worker-absent\\n" >> "$TEST_OBSERVED_PATH"; fi',
+    'if [ -n "$REMCODEX_PEER_ADMIN_TOKEN" ]; then printf "admin-present\\n" >> "$TEST_OBSERVED_PATH"; else printf "admin-absent\\n" >> "$TEST_OBSERVED_PATH"; fi',
     'printf \'{"type":"thread.started","thread_id":"isolated-test"}\\n\'',
   ].join("\n"), "utf8");
   fs.chmodSync(scriptPath, 0o755);
   process.env.REMCODEX_PEER_ADMIN_TOKEN = "peer-admin-isolated-test";
   process.env.CODEX_AGENT_ENVIRONMENTS_PATH = writeRegistry(root);
-  process.env.REMCODEX_TEST_OBSERVED = observedPath;
+  process.env.TEST_OBSERVED_PATH = observedPath;
   const server = await startRemCodexServer({
     port: 0,
     databasePath: path.join(root, "remcodex.sqlite"),
@@ -161,7 +161,7 @@ test("session launch passes only the scoped worker credential to an isolated chi
     else process.env.REMCODEX_PEER_ADMIN_TOKEN = previousAdminToken;
     if (previousRegistryPath === undefined) delete process.env.CODEX_AGENT_ENVIRONMENTS_PATH;
     else process.env.CODEX_AGENT_ENVIRONMENTS_PATH = previousRegistryPath;
-    if (previousObservedPath === undefined) delete process.env.REMCODEX_TEST_OBSERVED;
-    else process.env.REMCODEX_TEST_OBSERVED = previousObservedPath;
+    if (previousObservedPath === undefined) delete process.env.TEST_OBSERVED_PATH;
+    else process.env.TEST_OBSERVED_PATH = previousObservedPath;
   }
 });

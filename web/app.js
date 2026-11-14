@@ -4578,10 +4578,7 @@ function renderSessionDetail() {
 
   async function sendComposerMessage() {
     const content = String(composerTextarea?.value || "").trim();
-    const finalContent = composeMessageContentWithStartingPrompt(
-      content,
-      state.detail.startingPrompt,
-    );
+    const finalContent = content; // The server consumes the profile prompt exactly once.
     if (state.detail.startingPrompt) {
       state.detail.startingPrompt = "";
       state.detail.composerRefreshRequested = true;

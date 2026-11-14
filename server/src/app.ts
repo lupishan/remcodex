@@ -30,6 +30,7 @@ import {
   resolvePackageRoot,
 } from "./utils/runtime-paths";
 import { resolveExecutable } from "./utils/command";
+import { createControlAuth, isLoopbackHost } from "./utils/control-auth";
 import { isAppError } from "./utils/errors";
 import {
   parseRemCodexDirectoryInstances,
@@ -48,6 +49,7 @@ import {
 } from "./utils/agent-environment-registry";
 
 export interface RemCodexServerOptions {
+  host?: string;
   port?: number;
   databasePath?: string;
   configPath?: string;
@@ -80,6 +82,7 @@ export interface StartedRemCodexServer {
 }
 
 interface BuiltRemCodexServer {
+  host: string;
   app: express.Express;
   server: http.Server;
   closeDatabase: () => void;
@@ -99,6 +102,12 @@ interface BuiltRemCodexServer {
 function buildRemCodexServer(options: RemCodexServerOptions = {}): BuiltRemCodexServer {
   const repoRoot = options.repoRoot ? path.resolve(options.repoRoot) : resolvePackageRoot();
   const port = options.port ?? Number.parseInt(process.env.PORT ?? "18840", 10);
+  const host = options.host ?? (process.env.REMCODEX_HOST?.trim() || "127.0.0.1");
+  const apiToken = process.env.REMCODEX_API_TOKEN?.trim();
+  if (!isLoopbackHost(host) && !apiToken) {
+    throw new Error("Set REMCODEX_API_TOKEN before listening outside localhost.");
+  }
+  const controlAuth = createControlAuth(apiToken);
   const databasePath =
     options.databasePath ??
     process.env.DATABASE_PATH ??
@@ -158,14 +167,15 @@ function buildRemCodexServer(options: RemCodexServerOptions = {}): BuiltRemCodex
     codexCommand,
     codexMode,
     agentEnvironmentRegistry,
-    peerCommunication,
-    peerDigestScheduler,
+    peerCommunication: process.env.REMCODEX_PEER_ADMIN_TOKEN?.trim() ? peerCommunication : undefined,
+    peerDigestScheduler: process.env.REMCODEX_PEER_ADMIN_TOKEN?.trim() ? peerDigestScheduler : undefined,
   });
   const mcpApiToken = resolveMcpApiToken();
 
   const app = express();
   const server = http.createServer(app);
 
+  controlAuth.mount(app);
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/api/directory/instances", (_request, response) => {
@@ -279,9 +289,11 @@ function buildRemCodexServer(options: RemCodexServerOptions = {}): BuiltRemCodex
   registerSessionGateway(server, {
     eventStore,
     sessionManager,
+    authorize: controlAuth.authenticated,
   });
 
   return {
+    host,
     app,
     server,
     closeDatabase: () => {
@@ -310,6 +322,7 @@ export async function startRemCodexServer(
   await new Promise<void>((resolve, reject) => {
     const handleError = (error: Error) => {
       built.server.off("listening", handleListening);
+      built.stopPeerLifecycle(); built.stopDigestScheduler(); built.closeDatabase();
       reject(error);
     };
 
@@ -320,7 +333,7 @@ export async function startRemCodexServer(
 
     built.server.once("error", handleError);
     built.server.once("listening", handleListening);
-    built.server.listen(built.port);
+    built.server.listen(built.port, built.host);
   });
 
   if (built.logStartup) {

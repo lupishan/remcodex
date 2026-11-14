@@ -1,5 +1,5 @@
 <resources>
     <string name="app_name">RemCodex</string>
-    <string name="mobile_default_url">http://10.0.2.2:3000/</string>
+    <string name="mobile_default_url">http://10.0.2.2:18840/</string>
     <string name="mobile_load_error">Unable to reach RemCodex. Check the server URL and try again.</string>
 </resources>

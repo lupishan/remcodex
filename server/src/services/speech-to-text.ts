@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 
 import { resolveExecutable } from "../utils/command";
 
@@ -79,15 +79,15 @@ export class SpeechToTextService {
     return this.modelPath;
   }
 
-  transcribe(audioBytes: Buffer, mimeType?: string | null, filename?: string | null): string {
-    return this.transcribeDetailed(audioBytes, mimeType, filename).transcript;
+  async transcribe(audioBytes: Buffer, mimeType?: string | null, filename?: string | null): Promise<string> {
+    return (await this.transcribeDetailed(audioBytes, mimeType, filename)).transcript;
   }
 
-  transcribeDetailed(
+  async transcribeDetailed(
     audioBytes: Buffer,
     mimeType?: string | null,
     filename?: string | null,
-  ): SpeechToTextResult {
+  ): Promise<SpeechToTextResult> {
     if (!this.binaryPath) {
       throw new Error("No speech-to-text backend is available. Install a whisper CLI to enable voice notes.");
     }
@@ -99,14 +99,14 @@ export class SpeechToTextService {
       writeFileSync(inputPath, audioBytes);
 
       let outputPath = replaceExtension(inputPath, ".txt");
-      let runResult = this.runBinary(this.binaryPath, inputPath);
+      let runResult = await this.runBinaryAsync(this.binaryPath, inputPath);
       if (!runResult.ok) {
         const previousBinary = this.binaryPath;
         const stderr = runResult.stderr;
         this.fallbackToNextBinary();
         if (this.binaryPath && this.binaryPath !== previousBinary) {
           outputPath = replaceExtension(inputPath, ".txt");
-          runResult = this.runBinary(this.binaryPath, inputPath);
+          runResult = await this.runBinaryAsync(this.binaryPath, inputPath);
         }
         if (!runResult.ok) {
           throw new Error(
@@ -223,12 +223,21 @@ export class SpeechToTextService {
     this.binaryPath = this.discoverBinary();
   }
 
+  private runBinaryAsync(binaryPath: string, inputPath: string): Promise<{ ok: boolean; exitCode: number; stderr: string }> {
+    return new Promise(resolve => {
+      execFile(binaryPath, buildTranscriptionArgs(binaryPath, inputPath, this.modelPath), {
+        cwd: path.dirname(inputPath), timeout: 60_000, maxBuffer: 1024 * 1024,
+      }, (error, _stdout, stderr) => resolve({ ok: !error, exitCode: error ? 1 : 0, stderr: String(stderr).slice(-4096) }));
+    });
+  }
+
   private runBinary(binaryPath: string, inputPath: string): { ok: boolean; exitCode: number; stderr: string } {
     const args = buildTranscriptionArgs(binaryPath, inputPath, this.modelPath);
     try {
       execFileSync(binaryPath, args, {
         cwd: path.dirname(inputPath),
         stdio: ["ignore", "pipe", "pipe"],
+        timeout: 10_000,
       });
       return { ok: true, exitCode: 0, stderr: "" };
     } catch (error) {

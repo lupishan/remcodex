@@ -20,6 +20,7 @@ import { readPackageVersion } from "./utils/version";
 
 interface McpSessionEntry {
   transport: NodeStreamableHTTPServerTransport;
+  lastSeenAt: number;
 }
 
 export interface RemCodexMcpDependencies {
@@ -215,6 +216,11 @@ function registerToolserver(
     "worker.peer.timeline",
     "worker.peer.digest",
   ]);
+
+  server.registerTool("call-remote-tool", {
+    description: "Call a tool on an administrator-configured remote instance. Requires REMCODEX_ENABLE_REMOTE_MCP=1.",
+    inputSchema: z.object({ instanceName: z.string().min(1), toolName: z.string().min(1), arguments: z.record(z.string(), z.unknown()).optional() }),
+  }, async () => mcpErrorResult("Remote routing must be enabled on the server."));
 
   server.registerTool(
     "peer-issue-worker-credential",
@@ -516,7 +522,7 @@ function registerToolserver(
         if (profile && !selectedProfile) {
           return mcpErrorResult("Profile not found.");
         }
-        const selectedEnvironment = agentEnvironment ?? selectedProfile?.agent_environment;
+        const selectedEnvironment = agentEnvironment ?? selectedProfile?.agent_environment ?? deps.sessionManager.getDefaultAgentEnvironment();
         const project = projectId
           ? deps.projectManager.getProject(projectId)
           : deps.projectManager.getOrCreateProjectByPath(
@@ -533,14 +539,15 @@ function registerToolserver(
           return mcpErrorResult("Project and working directory do not refer to the same path.");
         }
 
-        const reusableSession = parentSessionId
+        const reusableSession = parentSessionId || profile
           ? null
-          : deps.sessionManager.findSessionByProjectPath(project.path);
+          : deps.sessionManager.findSessionByProjectPath(project.path, selectedEnvironment ?? null);
         const session =
           parentSessionId
             ? deps.sessionManager.createSession({
                 projectId: project.id,
                 title,
+                startingPrompt: selectedProfile?.starting_prompt,
                 description,
                 tags,
                 metadata,
@@ -551,6 +558,7 @@ function registerToolserver(
               deps.sessionManager.createSession({
                 projectId: project.id,
                 title,
+                startingPrompt: selectedProfile?.starting_prompt,
                 description,
                 tags,
                 metadata,
@@ -658,7 +666,9 @@ function registerToolserver(
         content: z.string().min(1),
         codex: z
           .object({
+            model: z.string().optional(),
             modelId: z.string().optional(),
+            reasoningEffort: z.string().optional(),
             reasoningId: z.string().optional(),
             profile: z.string().optional(),
             allowedTools: z.array(z.object({ server: z.string(), tool: z.string().optional() })).max(128).optional(),
@@ -672,7 +682,7 @@ function registerToolserver(
         const result = deps.sessionManager.sendMessage(
           sessionId,
           content,
-          normalizeCodexExecLaunchInput(codex),
+          normalizeCodexExecLaunchInput(codex ? { ...codex, model: codex.model ?? codex.modelId, reasoningEffort: codex.reasoningEffort ?? codex.reasoningId } : undefined),
         );
         return mcpJsonResult(result);
       } catch (error) {
@@ -746,7 +756,9 @@ function registerToolserver(
         requestId: z.string().min(1),
         codex: z
           .object({
+            model: z.string().optional(),
             modelId: z.string().optional(),
+            reasoningEffort: z.string().optional(),
             reasoningId: z.string().optional(),
             profile: z.string().optional(),
             allowedTools: z.array(z.object({ server: z.string(), tool: z.string().optional() })).max(128).optional(),
@@ -760,7 +772,7 @@ function registerToolserver(
         const result = deps.sessionManager.retryApprovalRequest(
           sessionId,
           requestId,
-          normalizeCodexExecLaunchInput(codex),
+          normalizeCodexExecLaunchInput(codex ? { ...codex, model: codex.model ?? codex.modelId, reasoningEffort: codex.reasoningEffort ?? codex.reasoningId } : undefined),
         );
         return mcpJsonResult(result);
       } catch (error) {
@@ -792,8 +804,16 @@ export async function handleRemCodexMcpRequest(
 
   const body = request.body as { method?: unknown; params?: { arguments?: Record<string, unknown> } };
   if (body?.method === "tools/call" && typeof body.params?.arguments?.instanceName === "string") {
+    if (process.env.REMCODEX_ENABLE_REMOTE_MCP !== "1") {
+      response.status(403).json({ error: "Remote MCP routing is experimental and disabled." }); return;
+    }
     try {
-      await proxyRemoteMcpCall(body, options.remoteInstances ?? [], response);
+      const params = body.params as { name?: string; arguments?: Record<string, unknown> };
+      const args = params.arguments ?? {};
+      const routedBody = params.name === "call-remote-tool"
+        ? { ...body, params: { name: args.toolName, arguments: { ...(args.arguments as Record<string, unknown> ?? {}), instanceName: args.instanceName } } }
+        : body;
+      await proxyRemoteMcpCall(routedBody, options.remoteInstances ?? [], response);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Remote MCP request failed.";
       response.status(/Unknown remote instance|credential is unavailable|must not target|must use https/i.test(message) ? 400 : 502).json({ error: message });
@@ -801,6 +821,11 @@ export async function handleRemCodexMcpRequest(
     return;
   }
 
+  for (const [id, entry] of sessions) {
+    if (Date.now() - entry.lastSeenAt > 30 * 60_000) {
+      sessions.delete(id); void entry.transport.close().catch(() => undefined);
+    }
+  }
   const sessionId = String(request.headers["mcp-session-id"] || "").trim();
 
   if (request.method === "DELETE") {
@@ -819,15 +844,17 @@ export async function handleRemCodexMcpRequest(
   }
 
   if (sessionId && sessions.has(sessionId)) {
+    sessions.get(sessionId)!.lastSeenAt = Date.now();
     await sessions.get(sessionId)?.transport.handleRequest(request, response, request.body);
     return;
   }
 
   if (!sessionId && isBootstrapRequest(request.body)) {
+    if (sessions.size >= 128) { response.status(503).json({ error: "Too many MCP sessions." }); return; }
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id: string) => {
-        sessions.set(id, { transport });
+        sessions.set(id, { transport, lastSeenAt: Date.now() });
       },
     });
 
