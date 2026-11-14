@@ -1,5 +1,6 @@
 import { getCodexHosts, getCodexQuota } from "../api.js";
 import { t } from "../i18n/index.js";
+import { normalizeSessionStartingPrompt } from "../utils/session-starting-prompt.js";
 
 const CODEX_LAUNCH_STORAGE_KEY = "remote-agent-console.codexLaunch.v1";
 
@@ -212,6 +213,20 @@ function renderComposerQuotaPopover(detailState) {
         <p class="input-popover-quota-line">${escapeHtml(t("composer.quota.week", { percent: weekPercent, reset: weekReset }))}</p>
       </div>
     </details>
+  `;
+}
+
+export function renderComposerStartingPromptBanner(detailState) {
+  const startingPrompt = normalizeSessionStartingPrompt(detailState?.startingPrompt || "");
+  if (!startingPrompt) {
+    return "";
+  }
+
+  return `
+    <div class="composer-starting-prompt-banner" aria-live="polite">
+      <span class="composer-starting-prompt-banner-label">${escapeHtml(t("composer.startingPromptBanner"))}</span>
+      <span class="composer-starting-prompt-banner-text" title="${escapeHtml(startingPrompt)}">${escapeHtml(startingPrompt)}</span>
+    </div>
   `;
 }
 
@@ -480,6 +495,8 @@ function persistCodexLaunchPrefs(prefs) {
   }
 }
 
+export { persistCodexLaunchPrefs };
+
 export function buildCodexLaunchPayload(launch, uiOptions) {
   if (!launch) {
     return undefined;
@@ -535,9 +552,17 @@ export function renderComposerInput({ session, detailState, uiOptions }) {
     .join("");
   const activeHost = detailState.activeRemoteHost || "--";
   const isBusy = isSessionComposerBusy(session);
+  const voiceRecording = Boolean(detailState.voiceRecording);
+  const voiceTranscribing = Boolean(detailState.voiceTranscribing);
+  const voiceButtonLabel = voiceTranscribing
+    ? t("composer.voice.transcribing")
+    : voiceRecording
+      ? t("composer.voice.stop")
+      : t("composer.voice.start");
 
   return `
     <div class="input-container ${isBusy ? "input-container--busy" : ""}">
+      ${renderComposerStartingPromptBanner(detailState)}
       <textarea
         name="content"
         class="input-area"
@@ -575,25 +600,44 @@ export function renderComposerInput({ session, detailState, uiOptions }) {
           </div>
         </div>
         <div class="toolbar-right">
-          <button
-            type="button"
-            id="composer-action"
-            class="composer-action-fab ${isBusy ? "composer-action-fab--stop" : "composer-action-fab--send"}"
-            aria-label="${escapeHtml(isBusy ? t("composer.aria.stop") : t("composer.aria.send"))}"
-          >
-            ${
-              isBusy
-                ? `<svg class="composer-action-icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" />
-                  </svg>`
-                : `<svg class="composer-action-icon" width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      fill="currentColor"
-                      d="M3.4 20.4 21 12 3.4 3.6l-.8 6.2 12.2 2.2-12.2 2.2.8 6.2Z"
-                    />
-                  </svg>`
-            }
-          </button>
+          <div class="composer-action-stack">
+            <button
+              type="button"
+              id="composer-action"
+              class="composer-action-fab ${isBusy ? "composer-action-fab--stop" : "composer-action-fab--send"}"
+              aria-label="${escapeHtml(isBusy ? t("composer.aria.stop") : t("composer.aria.send"))}"
+            >
+              ${
+                isBusy
+                  ? `<svg class="composer-action-icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" />
+                    </svg>`
+                  : `<svg class="composer-action-icon" width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        fill="currentColor"
+                        d="M3.4 20.4 21 12 3.4 3.6l-.8 6.2 12.2 2.2-12.2 2.2.8 6.2Z"
+                      />
+                    </svg>`
+              }
+            </button>
+            <button
+              type="button"
+              id="composer-voice-action"
+              class="composer-action-fab composer-action-fab--voice ${voiceRecording ? "composer-action-fab--voice-recording" : ""} ${voiceTranscribing ? "composer-action-fab--voice-transcribing" : ""}"
+              aria-label="${escapeHtml(voiceButtonLabel)}"
+              title="${escapeHtml(voiceButtonLabel)}"
+            >
+              ${
+                voiceTranscribing
+                  ? `<svg class="composer-action-icon composer-action-icon--voice" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fill="currentColor" d="M12 2.75a.75.75 0 0 1 .75.75v1.58a.75.75 0 0 1-1.5 0V3.5a.75.75 0 0 1 .75-.75Zm0 16.17a.75.75 0 0 1 .75.75v.83a.75.75 0 0 1-1.5 0v-.83a.75.75 0 0 1 .75-.75Zm8.5-7.67a.75.75 0 0 1 0 1.5h-1.58a.75.75 0 0 1 0-1.5h1.58Zm-15.42 0a.75.75 0 0 1 0 1.5H3.5a.75.75 0 0 1 0-1.5h1.58Zm11.36-5.86a.75.75 0 0 1 1.06 1.06l-1.12 1.12a.75.75 0 1 1-1.06-1.06l1.12-1.12Zm-8.82 8.82a.75.75 0 0 1 1.06 1.06l-1.12 1.12a.75.75 0 1 1-1.06-1.06l1.12-1.12Zm9.88 2.18a.75.75 0 0 1-1.06 1.06l-1.12-1.12a.75.75 0 0 1 1.06-1.06l1.12 1.12Zm-8.82-8.82A.75.75 0 0 1 7.62 7.57L6.5 6.45A.75.75 0 0 1 7.56 5.4l1.12 1.11ZM12 7.25a4.75 4.75 0 1 1 0 9.5a4.75 4.75 0 0 1 0-9.5Z" />
+                    </svg>`
+                  : `<svg class="composer-action-icon composer-action-icon--voice" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fill="currentColor" d="M12 14.75A3.75 3.75 0 0 0 15.75 11V6.75a3.75 3.75 0 0 0-7.5 0V11A3.75 3.75 0 0 0 12 14.75Zm0 2a5.75 5.75 0 0 1-5.75-5.75a.75.75 0 0 0-1.5 0A7.26 7.26 0 0 0 11.25 18.2v2.05a.75.75 0 0 0 1.5 0V18.2A7.26 7.26 0 0 0 19.25 11a.75.75 0 0 0-1.5 0A5.75 5.75 0 0 1 12 16.75Z" />
+                    </svg>`
+              }
+            </button>
+          </div>
         </div>
       </div>
     </div>

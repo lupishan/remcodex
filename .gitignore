@@ -4,3 +4,8 @@ server/data
 .DS_Store
 .idea/
 *.iml
+mobile/.gradle/
+mobile/build/
+mobile/app/build/
+mobile/local.properties
+mobile/.android/

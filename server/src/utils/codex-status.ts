@@ -76,11 +76,15 @@ export interface CodexStatusResponse {
 interface ResolveCodexStatusInput {
   threadId?: string | null;
   cwd?: string | null;
+  codexHome?: string | null;
   executionMode?: CodexStatusResponse["runtime"]["executionMode"];
   interactiveApprovalUi?: boolean;
 }
 
-function resolveCodexHomeDir(): string {
+function resolveCodexHomeDir(codexHome?: string | null): string {
+  if (codexHome?.trim()) {
+    return path.resolve(codexHome);
+  }
   const override = process.env.CODEX_HOME?.trim();
   if (override) {
     return path.resolve(override);
@@ -89,13 +93,13 @@ function resolveCodexHomeDir(): string {
   return path.join(os.homedir(), ".codex");
 }
 
-function resolveStateDbPath(): string {
+function resolveStateDbPath(codexHome?: string | null): string {
   const override = process.env.CODEX_STATE_DB_PATH?.trim();
   if (override) {
     return path.resolve(override);
   }
 
-  return path.join(resolveCodexHomeDir(), "state_5.sqlite");
+  return path.join(resolveCodexHomeDir(codexHome), "state_5.sqlite");
 }
 
 function toIso(unixSeconds: number): string {
@@ -220,7 +224,7 @@ function mapThread(row: CodexThreadRow): CodexStatusThread {
 }
 
 export function resolveCodexStatus(input: ResolveCodexStatusInput = {}): CodexStatusResponse {
-  const dbPath = resolveStateDbPath();
+  const dbPath = resolveStateDbPath(input.codexHome);
   if (!existsSync(dbPath)) {
     return {
       thread: null,

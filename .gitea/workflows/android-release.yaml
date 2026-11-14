@@ -1,0 +1,106 @@
+name: Android release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: android-34
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release tag and version contract
+        id: version
+        env:
+          RELEASE_TAG: ${{ gitea.ref_name }}
+        run: |
+          set -eu
+          node mobile/scripts/release-version.mjs "$RELEASE_TAG" | tee /tmp/remcodex-release-version
+          while IFS='=' read -r key value; do
+            echo "$key=$value" >> "$GITHUB_OUTPUT"
+          done < /tmp/remcodex-release-version
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build unsigned release APK
+        working-directory: mobile
+        run: ./gradlew --no-daemon --stacktrace assembleRelease
+
+      - name: Verify APK is unsigned and create release metadata
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.versionName }}
+          VERSION_CODE: ${{ steps.version.outputs.versionCode }}
+          COMMIT_SHA: ${{ gitea.sha }}
+        run: |
+          set -eu
+          apk="mobile/app/build/outputs/apk/release/app-release-unsigned.apk"
+          test -f "$apk"
+          if apksigner verify "$apk" >/dev/null 2>&1; then
+            echo "release APK unexpectedly has an Android signature" >&2
+            exit 1
+          fi
+          mkdir -p release-assets
+          artifact="remcodex-mobile-${VERSION_NAME}+${VERSION_CODE}-${COMMIT_SHA:0:12}.apk"
+          cp "$apk" "release-assets/$artifact"
+          sha256sum "release-assets/$artifact" > "release-assets/$artifact.sha256"
+          APK_FILE="$artifact" VERSION_NAME="$VERSION_NAME" VERSION_CODE="$VERSION_CODE" COMMIT_SHA="$COMMIT_SHA" node <<'NODE'
+          const fs = require("node:fs");
+          const crypto = require("node:crypto");
+          const artifact = process.env.APK_FILE;
+          const sha256 = crypto.createHash("sha256").update(fs.readFileSync(`release-assets/${artifact}`)).digest("hex");
+          const manifest = {
+            applicationId: "com.chiliahedron.remcodex",
+            versionName: process.env.VERSION_NAME,
+            versionCode: Number(process.env.VERSION_CODE),
+            commit: process.env.COMMIT_SHA,
+            artifact,
+            sha256,
+            signed: false,
+          };
+          fs.writeFileSync("release-assets/manifest.json", `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Build and test server
+        run: |
+          npm ci
+          npm run build
+          node --import tsx --test tests/*.test.ts
+
+      - name: Create Gitea Release and attach assets
+        env:
+          GITEA_API_URL: ${{ gitea.api_url }}
+          GITEA_REPOSITORY: ${{ gitea.repository }}
+          RELEASE_TAG: ${{ gitea.ref_name }}
+          REMCODEX_RELEASE_TOKEN: ${{ secrets.REMCODEX_RELEASE_TOKEN }}
+        run: |
+          set -eu
+          test -n "$REMCODEX_RELEASE_TOKEN"
+          auth="Authorization: token $REMCODEX_RELEASE_TOKEN"
+          release_url="$GITEA_API_URL/repos/$GITEA_REPOSITORY/releases/tags/$RELEASE_TAG"
+          response=$(curl --fail --silent --show-error --header "$auth" "$release_url" || true)
+          if [ -z "$response" ]; then
+            response=$(curl --fail --silent --show-error --request POST \
+              --header "$auth" --header 'Content-Type: application/json' \
+              --data "{\"tag_name\":\"$RELEASE_TAG\",\"name\":\"RemCodex $RELEASE_TAG\",\"draft\":false,\"prerelease\":false}" \
+              "$GITEA_API_URL/repos/$GITEA_REPOSITORY/releases")
+          fi
+          release_id=$(printf '%s' "$response" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).id)))')
+          for asset in release-assets/*; do
+            asset_name=$(basename "$asset")
+            encoded_name=$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$asset_name")
+            curl --fail --silent --show-error --request POST \
+              --header "$auth" --header 'Content-Type: application/octet-stream' \
+              --data-binary "@$asset" \
+              "$GITEA_API_URL/repos/$GITEA_REPOSITORY/releases/$release_id/assets?name=$encoded_name" >/dev/null
+          done

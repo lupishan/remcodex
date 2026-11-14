@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir, networkInterfaces } from "node:os";
 import path from "node:path";
 
 import type { CodexExecutionMode } from "./services/codex-runner";
+import { SpeechToTextService } from "./services/speech-to-text";
 import { resolveDefaultDatabasePath, resolvePackageRoot } from "./utils/runtime-paths";
 import { resolveExecutable } from "./utils/command";
+import { resolveRemCodexPublicBaseUrl } from "./utils/remcodex-url";
+import { readPackageVersion } from "./utils/version";
 
 interface CliFlags {
   port?: number;
@@ -21,18 +24,6 @@ function print(message = "") {
 
 function printError(message = "") {
   process.stderr.write(`${message}\n`);
-}
-
-function readPackageVersion(): string {
-  try {
-    const packageRoot = resolvePackageRoot();
-    const packageJson = JSON.parse(
-      readFileSync(path.join(packageRoot, "package.json"), "utf8"),
-    ) as { version?: unknown };
-    return typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
 }
 
 function isExecutableFile(filePath: string): boolean {
@@ -87,7 +78,8 @@ function parseFlags(argv: string[]): CliFlags {
 }
 
 function getLanAddresses(): string[] {
-  const interfaces = networkInterfaces();
+  let interfaces: ReturnType<typeof networkInterfaces>;
+  try { interfaces = networkInterfaces(); } catch { return []; }
   const addresses: string[] = [];
 
   Object.values(interfaces).forEach((entries) => {
@@ -134,6 +126,7 @@ function usage() {
   print("  remcodex                Start the local web app");
   print("  remcodex start          Start the local web app");
   print("  remcodex doctor         Check local environment");
+  print("  remcodex stt-self-test  Validate local speech-to-text wiring");
   print("  remcodex version        Show version");
   print("");
   print("Options:");
@@ -160,6 +153,10 @@ async function runDoctor(flags: CliFlags): Promise<number> {
   const version = readPackageVersion();
   const rawCodexCommand = process.env.CODEX_COMMAND ?? "codex";
   const codex = commandExists(rawCodexCommand);
+  const speechToText = new SpeechToTextService({
+    preferredBinary: process.env.REMCODEX_STT_BINARY,
+    modelPath: process.env.REMCODEX_STT_MODEL_PATH,
+  });
   const packageRoot = resolvePackageRoot();
   const databasePath = flags.databasePath ?? process.env.DATABASE_PATH ?? resolveDefaultDatabasePath();
   const databaseDir = path.dirname(databasePath);
@@ -186,6 +183,8 @@ async function runDoctor(flags: CliFlags): Promise<number> {
   print(`Codex command: ${rawCodexCommand}`);
   print(`Codex resolved: ${codex.resolved}`);
   print(`Codex available: ${codex.ok ? "yes" : "no"}`);
+  print(`STT binary: ${speechToText.getBinaryPath() || "not found"}`);
+  print(`STT model: ${speechToText.getModelPath() || "not configured"}`);
 
   if (!codex.ok) {
     printError("");
@@ -197,6 +196,23 @@ async function runDoctor(flags: CliFlags): Promise<number> {
   print("");
   print("Environment looks good.");
   return 0;
+}
+
+async function runSpeechToTextSelfTest(): Promise<number> {
+  const speechToText = new SpeechToTextService({
+    preferredBinary: process.env.REMCODEX_STT_BINARY,
+    modelPath: process.env.REMCODEX_STT_MODEL_PATH,
+  });
+  const result = speechToText.selfTest();
+
+  print("RemCodex speech-to-text self-test");
+  print("");
+  print(`STT binary: ${result.binaryPath || "not found"}`);
+  print(`STT model: ${result.modelPath || "not configured"}`);
+  print(`Result: ${result.ok ? "ok" : "failed"}`);
+  print(result.details);
+
+  return result.ok ? 0 : 1;
 }
 
 async function runStart(flags: CliFlags): Promise<number> {
@@ -256,7 +272,8 @@ async function runStart(flags: CliFlags): Promise<number> {
   }
 
   const localUrl = `http://127.0.0.1:${activePort}`;
-  const lanUrls = getLanAddresses().map((address) => `http://${address}:${activePort}`);
+  const lanEnabled = Boolean(process.env.REMCODEX_HOST && !["127.0.0.1", "localhost", "::1"].includes(process.env.REMCODEX_HOST));
+  const lanUrls = lanEnabled ? getLanAddresses().map((address) => `http://${address}:${activePort}`) : [];
 
   print(`RemCodex v${version}`);
   print("");
@@ -266,9 +283,15 @@ async function runStart(flags: CliFlags): Promise<number> {
   print(`Database: ${started.databasePath}`);
   print("");
   print(`Local: ${localUrl}`);
-  lanUrls.forEach((url) => {
-    print(`LAN:   ${url}`);
-  });
+  const publicBaseUrl = resolveRemCodexPublicBaseUrl();
+  if (publicBaseUrl) {
+    print(`Public: ${publicBaseUrl}`);
+  }
+  if (lanEnabled) {
+    lanUrls.forEach((url) => print(`LAN:   ${url}`));
+  } else {
+    print("Phone access: set REMCODEX_HOST=0.0.0.0 and REMCODEX_API_TOKEN, then restart.");
+  }
 
   if (!flags.noOpen) {
     openBrowser(localUrl);
@@ -316,6 +339,9 @@ async function main() {
       return;
     case "doctor":
       process.exitCode = await runDoctor(flags);
+      return;
+    case "stt-self-test":
+      process.exitCode = await runSpeechToTextSelfTest();
       return;
     case "version":
       print(readPackageVersion());

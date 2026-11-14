@@ -60,11 +60,22 @@ export function runMigrations(db: DatabaseClient): void {
   db.exec(schema);
 
   ensureColumn(db, "sessions", "source_kind", "TEXT NOT NULL DEFAULT 'native'");
+  ensureColumn(db, "agent_profiles", "agent_environment", "TEXT");
+  ensureColumn(db, "sessions", "parent_session_id", "TEXT");
+  ensureColumn(db, "sessions", "agent_environment", "TEXT");
+  ensureColumn(db, "sessions", "starting_prompt", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "sessions", "description", "TEXT");
+  ensureColumn(db, "sessions", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "sessions", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, "sessions", "source_rollout_path", "TEXT");
   ensureColumn(db, "sessions", "source_thread_id", "TEXT");
   ensureColumn(db, "sessions", "source_sync_cursor", "INTEGER");
   ensureColumn(db, "sessions", "source_last_synced_at", "TEXT");
   ensureColumn(db, "sessions", "source_rollout_has_open_turn", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "sessions", "app_server_id", "TEXT");
+  ensureColumn(db, "sessions", "app_server_endpoint", "TEXT");
+  ensureColumn(db, "sessions", "app_server_pid", "INTEGER");
+  ensureColumn(db, "peer_credentials", "last_seen_at", "TEXT NOT NULL DEFAULT ''");
 
   // Older imports mapped external open turns to status=running; that is not local runner state.
   db.exec(

@@ -1,5 +1,15 @@
 export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
+export interface CodexMcpToolSelector {
+  server: string;
+  tool?: string;
+}
+
+export interface CodexMcpToolPolicy {
+  allowedTools?: CodexMcpToolSelector[];
+  deniedTools?: CodexMcpToolSelector[];
+}
+
 export interface CodexExecLaunchInput {
   model?: string;
   profile?: string;
@@ -10,4 +20,6 @@ export interface CodexExecLaunchInput {
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   enableFeatures?: string[];
   disableFeatures?: string[];
+  allowedTools?: CodexMcpToolSelector[];
+  deniedTools?: CodexMcpToolSelector[];
 }

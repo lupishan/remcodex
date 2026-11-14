@@ -1,0 +1,16 @@
+# Copy this to ~/.remcodex/config.toml or point REMCODEX_CONFIG_PATH at it.
+
+[[profiles]]
+name = "orchestrator"
+starting_prompt = "Manage delegated Codex work by reusing an existing session in the requested directory or starting a fresh session there when none exists."
+default_directory = "/home/evak/programming"
+
+[[profiles]]
+name = "remcodex-demo"
+starting_prompt = "Use RemCodex to inspect the current session, keep the workspace state in view, and prefer small safe changes when testing UI flows."
+default_directory = "/home/evak/programming/by_category/agentic/remcodex"
+
+[[profiles]]
+name = "remcodex-review"
+starting_prompt = "Review the current RemCodex worktree, summarize risks, and check for regressions before making changes."
+default_directory = "/home/evak/programming/by_category/agentic/remcodex"

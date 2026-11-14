@@ -28,6 +28,14 @@ export function getProjects() {
   return request("/api/projects");
 }
 
+export function getProfiles() {
+  return request("/api/profiles");
+}
+
+export function getAgentEnvironments() {
+  return request("/api/agent-environments");
+}
+
 export function createProject(payload) {
   return request("/api/projects", {
     method: "POST",
@@ -60,6 +68,13 @@ export function importCodexSession(payload) {
 
 export function getSession(sessionId) {
   return request(`/api/sessions/${sessionId}`);
+}
+
+export function updateSessionMetadata(sessionId, payload) {
+  return request(`/api/sessions/${sessionId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function syncImportedSession(sessionId) {
@@ -122,6 +137,31 @@ export function sendMessage(sessionId, payload) {
   return request(`/api/sessions/${sessionId}/messages`, {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export async function sendVoiceMessage(sessionId, audioBlob, options = {}) {
+  const headers = {};
+  if (options.mimeType) {
+    headers["Content-Type"] = options.mimeType;
+  }
+  if (options.filename) {
+    headers["X-Filename"] = options.filename;
+  }
+  if (options.modelId) {
+    headers["X-Codex-Model"] = options.modelId;
+  }
+  if (options.reasoningEffort) {
+    headers["X-Codex-Reasoning"] = options.reasoningEffort;
+  }
+  if (options.profile) {
+    headers["X-Codex-Profile"] = options.profile;
+  }
+
+  return request(`/api/sessions/${sessionId}/messages/voice`, {
+    method: "POST",
+    headers,
+    body: audioBlob,
   });
 }
 

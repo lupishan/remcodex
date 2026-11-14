@@ -9,7 +9,9 @@ import {
   getCodexUiOptions,
   getCodexStatus,
   getHealth,
+  getAgentEnvironments,
   getProjects,
+  getProfiles,
   getSession,
   getSessionEvents,
   getSessionTimelineEvents,
@@ -17,6 +19,7 @@ import {
   resolveSessionApproval,
   retrySessionApproval,
   sendMessage,
+  sendVoiceMessage,
   stopSession,
   syncImportedSession,
 } from "./api.js";
@@ -28,7 +31,12 @@ import {
   loadCodexLaunchPrefs,
   normalizeCodexLaunchAgainstUi,
   renderComposerInput,
+  persistCodexLaunchPrefs,
 } from "./components/composer.js";
+import {
+  composeMessageContentWithStartingPrompt,
+  normalizeSessionStartingPrompt,
+} from "./utils/session-starting-prompt.js";
 import { renderSessionTopBar } from "./components/session-workbench.js";
 import {
   normalizeRawSessionEvent,
@@ -51,11 +59,23 @@ import {
 } from "./session-timeline-reducer.js";
 import { renderTimeline, renderTimelineList } from "./session-timeline-renderer.js";
 import { connectSessionSocket } from "./session-ws.js";
+import { sessionMatchesSearch } from "./utils/session-search.js";
+import { hasWarmWorkspaceCache, shouldRefreshVisibleDetail } from "./utils/refresh-coordinator.js";
+import {
+  buildReplySocketConnectionId,
+  classifyReplyEvent,
+  summarizeReplyEvent,
+} from "./session-reply-diagnostics.js";
 
 const app = document.querySelector("#app");
 const SESSION_VIEW_STORAGE_KEY = "remote-agent-console.sessions.view";
 const CODEX_QUOTA_CACHE_PREFIX = "remote-agent-console.codexQuota:";
 const WORKSPACE_UI_STORAGE_KEY = "remote-agent-console.workspace.ui";
+const WORKSPACE_SESSION_EXPANDED_STORAGE_KEY = "remote-agent-console.workspace.expandedSessions.v1";
+const WORKSPACE_SESSION_COLLAPSED_STORAGE_KEY = "remote-agent-console.workspace.collapsedSessions.v1";
+const WORKSPACE_NEW_SESSION_PROFILE_STORAGE_KEY = "remote-agent-console.workspace.newSessionProfile.v1";
+const WORKSPACE_SESSION_STARTING_PROMPT_STORAGE_PREFIX =
+  "remote-agent-console.workspace.sessionStartingPrompt.v1:";
 const SLOW_COMMAND_SECONDS = 5;
 const LONG_RUNNING_COMMAND_SECONDS = 10;
 const COMMAND_PREVIEW_HEAD_LINES = 3;
@@ -68,8 +88,13 @@ const INITIAL_DETAIL_EVENT_PAGE_LIMIT = 200;
 const INITIAL_DETAIL_MIN_TURNS = 4;
 const INITIAL_DETAIL_MAX_PAGES = 5;
 const DETAIL_RENDER_BATCH_MS = 0;
+const CLIENT_DEBUG_LOG_LIMIT = 120;
 let lastToastMessage = "";
 let lastToastAt = 0;
+let activeVoiceRecorder = null;
+let activeVoiceStream = null;
+let activeVoiceChunks = [];
+let activeVoiceMimeType = "";
 const GENERIC_SESSION_TITLES = new Set([
   "未命名会话",
   "新会话",
@@ -91,7 +116,130 @@ const DEFAULT_DETAIL_VIEW = {
   search: "",
   autoScroll: true,
   rawStdoutBuckets: {},
+  clientLogs: [],
 };
+
+function getWorkspaceSessionStartingPromptStorageKey(sessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  return normalizedSessionId
+    ? `${WORKSPACE_SESSION_STARTING_PROMPT_STORAGE_PREFIX}${normalizedSessionId}`
+    : "";
+}
+
+function loadWorkspaceSessionStartingPrompt(sessionId) {
+  const storageKey = getWorkspaceSessionStartingPromptStorageKey(sessionId);
+  if (!storageKey) {
+    return "";
+  }
+
+  try {
+    return normalizeSessionStartingPrompt(window.localStorage?.getItem(storageKey) || "");
+  } catch {
+    return "";
+  }
+}
+
+function persistWorkspaceSessionStartingPrompt(sessionId, prompt) {
+  const storageKey = getWorkspaceSessionStartingPromptStorageKey(sessionId);
+  if (!storageKey) {
+    return;
+  }
+
+  const normalizedPrompt = normalizeSessionStartingPrompt(prompt);
+  try {
+    if (normalizedPrompt) {
+      window.localStorage?.setItem(storageKey, normalizedPrompt);
+    } else {
+      window.localStorage?.removeItem(storageKey);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearWorkspaceSessionStartingPrompt(sessionId) {
+  persistWorkspaceSessionStartingPrompt(sessionId, "");
+}
+
+function browserSupportsVoiceRecording() {
+  return Boolean(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
+}
+
+function getPreferredVoiceMimeType() {
+  if (!window.MediaRecorder?.isTypeSupported) {
+    return "";
+  }
+
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/ogg",
+  ];
+  return candidates.find((candidate) => window.MediaRecorder.isTypeSupported(candidate)) || "";
+}
+
+function formatClientLogDetails(details) {
+  if (details == null) {
+    return "";
+  }
+
+  if (typeof details === "string") {
+    return details;
+  }
+
+  if (details instanceof Error) {
+    return details.stack || `${details.name}: ${details.message}`;
+  }
+
+  try {
+    return JSON.stringify(details, null, 2);
+  } catch (_error) {
+    return String(details);
+  }
+}
+
+function pushClientDebugLog(level, message, details) {
+  const normalizedLevel = ["debug", "info", "warn", "error"].includes(level) ? level : "info";
+  const entry = {
+    ts: Date.now(),
+    level: normalizedLevel,
+    message: String(message || ""),
+    details: details ?? null,
+  };
+
+  state.detail.clientLogs = [...(state.detail.clientLogs || []), entry].slice(-CLIENT_DEBUG_LOG_LIMIT);
+
+  const consoleMethod = typeof console[normalizedLevel] === "function" ? console[normalizedLevel] : console.log;
+  const prefix = `[remcodex] ${entry.message}`;
+  if (entry.details == null) {
+    consoleMethod.call(console, prefix);
+  } else {
+    consoleMethod.call(console, prefix, entry.details);
+  }
+
+  return entry;
+}
+
+function stopActiveVoiceStream() {
+  if (activeVoiceStream?.getTracks) {
+    activeVoiceStream.getTracks().forEach((track) => {
+      try {
+        track.stop();
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+  activeVoiceStream = null;
+}
+
+function resetVoiceCaptureState() {
+  activeVoiceRecorder = null;
+  activeVoiceChunks = [];
+  activeVoiceMimeType = "";
+  stopActiveVoiceStream();
+}
 
 function renderAppChrome({
   variant,
@@ -104,6 +252,7 @@ function renderAppChrome({
   const nav = `<nav class="app-top-nav" aria-label="${escapeHtml(t("nav.sessions"))}">
     <a href="#/projects" class="app-nav-link">${escapeHtml(t("nav.projects"))}</a>
     <a href="#/sessions" class="app-nav-link">${escapeHtml(t("nav.sessions"))}</a>
+    <a href="#/sessions?status=running" class="app-nav-link">${escapeHtml(t("sessions.runningView"))}</a>
   </nav>`;
 
   if (variant === "marketing") {
@@ -179,6 +328,97 @@ function writeWorkspaceUiState() {
     );
   } catch {
     /* ignore */
+  }
+}
+
+function readWorkspaceExpandedSessionIds() {
+  try {
+    const raw = window.localStorage?.getItem(WORKSPACE_SESSION_EXPANDED_STORAGE_KEY) || "";
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed.reduce((acc, value) => {
+      const sessionId = String(value || "").trim();
+      if (sessionId) {
+        acc[sessionId] = true;
+      }
+      return acc;
+    }, {});
+  } catch {
+    return {};
+  }
+}
+
+function readWorkspaceCollapsedSessionIds() {
+  try {
+    const raw = window.localStorage?.getItem(WORKSPACE_SESSION_COLLAPSED_STORAGE_KEY) || "";
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed.reduce((acc, value) => {
+      const sessionId = String(value || "").trim();
+      if (sessionId) {
+        acc[sessionId] = true;
+      }
+      return acc;
+    }, {});
+  } catch {
+    return {};
+  }
+}
+
+function writeWorkspaceExpandedSessionIds() {
+  try {
+    window.localStorage?.setItem(
+      WORKSPACE_SESSION_EXPANDED_STORAGE_KEY,
+      JSON.stringify(Object.keys(state.workspace.expandedSessionIds || {}).filter((sessionId) => state.workspace.expandedSessionIds[sessionId])),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function writeWorkspaceCollapsedSessionIds() {
+  try {
+    window.localStorage?.setItem(
+      WORKSPACE_SESSION_COLLAPSED_STORAGE_KEY,
+      JSON.stringify(Object.keys(state.workspace.collapsedSessionIds || {}).filter((sessionId) => state.workspace.collapsedSessionIds[sessionId])),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function setWorkspaceSessionExpanded(sessionId, expanded, selectedSessionId = state.workspace.activeSessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+
+  const next = { ...(state.workspace.expandedSessionIds || {}) };
+  const nextCollapsed = { ...(state.workspace.collapsedSessionIds || {}) };
+  if (expanded) {
+    next[normalizedSessionId] = true;
+    delete nextCollapsed[normalizedSessionId];
+  } else {
+    delete next[normalizedSessionId];
+    nextCollapsed[normalizedSessionId] = true;
+  }
+  state.workspace.expandedSessionIds = next;
+  state.workspace.collapsedSessionIds = nextCollapsed;
+  writeWorkspaceExpandedSessionIds();
+  writeWorkspaceCollapsedSessionIds();
+  patchWorkspaceSidebar(selectedSessionId);
+  if (parseHashRoute(window.location.hash || "").path === "#/sessions") {
+    renderSessionsList();
   }
 }
 
@@ -738,7 +978,16 @@ function mergeDetailTimelineRawEvents(nextRawEvents) {
 
   const filteredRawEvents = nextRawEvents.filter((rawEvent) => {
     const eventSessionId = String(rawEvent?.sessionId || rawEvent?.session_id || "").trim();
-    return !eventSessionId || eventSessionId === activeSessionId;
+    const matches = !eventSessionId || eventSessionId === activeSessionId;
+    if (!matches) {
+      pushClientDebugLog("warn", "Discarding session event for inactive session", {
+        sessionId: activeSessionId,
+        eventSessionId,
+        correlationId: getReplyCorrelationId(),
+        ...summarizeReplyEvent(rawEvent),
+      });
+    }
+    return matches;
   });
 
   if (filteredRawEvents.length === 0) {
@@ -754,12 +1003,43 @@ function mergeDetailTimelineRawEvents(nextRawEvents) {
   let canApplyIncrementally = true;
 
   filteredRawEvents.forEach((rawEvent) => {
-    if (!rawEvent?.id || existingIds.has(rawEvent.id)) {
+    const classification = classifyReplyEvent(rawEvent, {
+      knownEventIds: existingIds,
+      lastSeq: currentMaxSeq,
+    });
+    if (classification.classification === "duplicate") {
+      pushClientDebugLog("debug", "Ignoring duplicate session event", {
+        sessionId: activeSessionId,
+        correlationId: getReplyCorrelationId(),
+        ...classification,
+      });
+      return;
+    }
+    if (!rawEvent?.id) {
+      pushClientDebugLog("warn", "Ignoring session event without stable id", {
+        sessionId: activeSessionId,
+        correlationId: getReplyCorrelationId(),
+        ...classification,
+      });
       return;
     }
 
     existingIds.add(rawEvent.id);
     appended.push(rawEvent);
+    if (["delayed", "same_sequence"].includes(classification.classification)) {
+      pushClientDebugLog("warn", "Applying out-of-order session event", {
+        sessionId: activeSessionId,
+        correlationId: getReplyCorrelationId(),
+        ...classification,
+      });
+    }
+    if (classification.classification === "gap") {
+      pushClientDebugLog("warn", "Session event sequence gap detected", {
+        sessionId: activeSessionId,
+        correlationId: getReplyCorrelationId(),
+        ...classification,
+      });
+    }
     if (Number(rawEvent.seq || 0) < currentMaxSeq) {
       canApplyIncrementally = false;
     }
@@ -769,11 +1049,28 @@ function mergeDetailTimelineRawEvents(nextRawEvents) {
     return;
   }
 
+  pushClientDebugLog("debug", "Merging timeline events", {
+    sessionId: activeSessionId,
+    correlationId: getReplyCorrelationId(),
+    incomingCount: nextRawEvents.length,
+    appendedCount: appended.length,
+    incremental: canApplyIncrementally,
+    seqRange: {
+      first: appended[0]?.seq || 0,
+      last: appended[appended.length - 1]?.seq || 0,
+    },
+  });
+
   state.detail.rawEvents = [...state.detail.rawEvents, ...appended].sort(
     (a, b) => (a.seq || 0) - (b.seq || 0),
   );
 
   if (!canApplyIncrementally) {
+    pushClientDebugLog("info", "Replaying timeline after delayed event", {
+      sessionId: activeSessionId,
+      correlationId: getReplyCorrelationId(),
+      appendedCount: appended.length,
+    });
     state.detail.timelineState = buildTimelineStateFromRawEvents(state.detail.rawEvents);
     state.detail.timelineItems = buildTimelineView(state.detail.timelineState);
     maybeClearOptimisticSendFromTimeline();
@@ -782,10 +1079,28 @@ function mergeDetailTimelineRawEvents(nextRawEvents) {
   }
 
   const normalizedAppended = normalizeRawSessionEvents(appended);
+  const normalizedSourceCount = appended.reduce(
+    (count, rawEvent) => count + (normalizeRawSessionEvent(rawEvent) ? 1 : 0),
+    0,
+  );
+  if (normalizedSourceCount !== appended.length) {
+    pushClientDebugLog("warn", "Session events were not normalized for timeline", {
+      sessionId: activeSessionId,
+      correlationId: getReplyCorrelationId(),
+      receivedCount: appended.length,
+      normalizedSourceCount,
+      expandedTimelineEventCount: normalizedAppended.length,
+      droppedCount: appended.length - normalizedSourceCount,
+    });
+  }
   reduceTimelineBatch(state.detail.timelineState, normalizedAppended);
   state.detail.timelineItems = buildTimelineView(state.detail.timelineState);
   maybeClearOptimisticSendFromTimeline();
   syncDetailPendingApproval(state.detail.session, state.detail.timelineState);
+}
+
+function getReplyCorrelationId() {
+  return String(state.detail.replyCorrelationId || "").trim() || null;
 }
 
 function getActiveDetailSessionId() {
@@ -804,37 +1119,74 @@ async function catchUpSessionEvents(sessionId, afterSeq) {
     return;
   }
 
-  for (let page = 0; page < 10; page += 1) {
-    if (!isActiveDetailSession(normalizedSessionId)) {
-      return;
-    }
+  pushClientDebugLog("debug", "Catching up session events", {
+    sessionId: normalizedSessionId,
+    correlationId: getReplyCorrelationId(),
+    afterSeq: nextAfter,
+  });
+  try {
+    for (let page = 0; page < 10; page += 1) {
+      if (!isActiveDetailSession(normalizedSessionId)) {
+        return;
+      }
 
-    const payload = await getSessionEvents(normalizedSessionId, {
-      after: nextAfter,
-      limit: 200,
+      const payload = await getSessionEvents(normalizedSessionId, {
+        after: nextAfter,
+        limit: 200,
+      });
+      if (!isActiveDetailSession(normalizedSessionId)) {
+        return;
+      }
+
+      const items = Array.isArray(payload?.items)
+        ? payload.items.filter((item) => {
+            const eventSessionId = String(item?.sessionId || item?.session_id || "").trim();
+            const matches = !eventSessionId || eventSessionId === normalizedSessionId;
+            if (!matches) {
+              pushClientDebugLog("warn", "Discarding catch-up event for inactive session", {
+                sessionId: normalizedSessionId,
+                eventSessionId,
+                correlationId: getReplyCorrelationId(),
+                ...summarizeReplyEvent(item),
+              });
+            }
+            return matches;
+          })
+        : [];
+      if (items.length === 0) {
+        pushClientDebugLog("debug", "Catch-up returned no new events", {
+          sessionId: normalizedSessionId,
+          correlationId: getReplyCorrelationId(),
+          page,
+          afterSeq: nextAfter,
+        });
+        return;
+      }
+
+      trackUnseenEvents(items);
+      mergeDetailTimelineRawEvents(items);
+      nextAfter = Number(payload?.nextCursor || nextAfter);
+      state.detail.cursor = Math.max(state.detail.cursor, nextAfter);
+      pushClientDebugLog("debug", "Catch-up applied events", {
+        sessionId: normalizedSessionId,
+        correlationId: getReplyCorrelationId(),
+        page,
+        appliedCount: items.length,
+        nextCursor: nextAfter,
+      });
+
+      if (items.length < 200) {
+        return;
+      }
+    }
+  } catch (error) {
+    pushClientDebugLog("warn", "Catch-up failed", {
+      sessionId: normalizedSessionId,
+      correlationId: getReplyCorrelationId(),
+      afterSeq: nextAfter,
+      error: messageOf(error),
     });
-    if (!isActiveDetailSession(normalizedSessionId)) {
-      return;
-    }
-
-    const items = Array.isArray(payload?.items)
-      ? payload.items.filter((item) => {
-          const eventSessionId = String(item?.sessionId || item?.session_id || "").trim();
-          return !eventSessionId || eventSessionId === normalizedSessionId;
-        })
-      : [];
-    if (items.length === 0) {
-      return;
-    }
-
-    trackUnseenEvents(items);
-    mergeDetailTimelineRawEvents(items);
-    nextAfter = Number(payload?.nextCursor || nextAfter);
-    state.detail.cursor = Math.max(state.detail.cursor, nextAfter);
-
-    if (items.length < 200) {
-      return;
-    }
+    throw error;
   }
 }
 
@@ -1346,7 +1698,13 @@ const state = {
   workspace: {
     sidebarCollapsed: readWorkspaceUiState().sidebarCollapsed,
     localeMenuOpen: false,
+    newSessionProfileMenuOpen: false,
     activeSessionId: "",
+    profiles: [],
+    agentEnvironments: [],
+    selectedAgentEnvironment: "",
+    expandedSessionIds: readWorkspaceExpandedSessionIds(),
+    collapsedSessionIds: readWorkspaceCollapsedSessionIds(),
     createDialog: {
       open: false,
       mode: "pick-project",
@@ -1375,8 +1733,17 @@ const state = {
     projects: [],
     ...DEFAULT_SESSIONS_VIEW,
   },
+  runtime: {
+    uiOptions: null,
+    hosts: null,
+    profiles: null,
+    collectionsPromise: null,
+    codexStatusBySession: {},
+  },
   detail: {
     session: null,
+    replyCorrelationId: "",
+    replySocketAttempt: 0,
     rawEvents: [],
     timelineState: createEmptyTimelineState(),
     timelineItems: [],
@@ -1409,6 +1776,10 @@ const state = {
     liveResumeTimerId: 0,
     importedSyncTimerId: 0,
     composerEnvironmentMenuOpen: false,
+    voiceRecording: false,
+    voiceTranscribing: false,
+    startingPrompt: "",
+    composerRefreshRequested: false,
     slashMenuOpen: false,
     slashCommands: [],
     slashCommandsLoading: false,
@@ -1442,6 +1813,7 @@ window.addEventListener("pageshow", () => {
 
 function renderRoute() {
   state.detail.loadRequestId = Number(state.detail.loadRequestId || 0) + 1;
+  resetVoiceCaptureState();
   cleanupSocket();
   cleanupDetailClock();
   cleanupLiveResumeSync();
@@ -1457,7 +1829,7 @@ function renderRoute() {
   state.route = hash;
 
   const matched = route.path.match(/^#\/sessions\/([^/]+)$/);
-  hydrateSessionsViewState("");
+  hydrateSessionsViewState(matched ? "" : route.query);
   if (matched) {
     hydrateSessionDetailViewState(route.query);
   } else {
@@ -1465,6 +1837,10 @@ function renderRoute() {
       ...state.detail,
       ...DEFAULT_DETAIL_VIEW,
       optimisticSend: null,
+      voiceRecording: false,
+      voiceTranscribing: false,
+      startingPrompt: "",
+      composerRefreshRequested: false,
     };
   }
 
@@ -1489,7 +1865,7 @@ function resolveWorkspaceSessionId(routeSessionId) {
     return state.workspace.activeSessionId;
   }
 
-  return getWorkspaceFilteredSessions()[0]?.sessionId || state.sessions.items[0]?.sessionId || "";
+  return buildWorkspaceSessionRows(state.sessions.items, state.sessions, "")[0]?.session.sessionId || state.sessions.items[0]?.sessionId || "";
 }
 
 function renderWorkspaceEmptyState() {
@@ -1550,6 +1926,433 @@ function getDefaultWorkspaceProjectBrowsePath() {
   );
 }
 
+function getWorkspaceNewSessionProfileItems() {
+  const profiles = Array.isArray(state.workspace.profiles) ? state.workspace.profiles : [];
+  const uniqueProfiles = [];
+  const seenNames = new Set();
+
+  for (const profile of profiles) {
+    const name = String(profile?.name || "").trim();
+    if (!name || seenNames.has(name)) {
+      continue;
+    }
+    seenNames.add(name);
+    uniqueProfiles.push(profile);
+  }
+
+  return [
+    { name: "", label: t("workspace.sidebar.newSessionCustom") },
+    ...uniqueProfiles.map((profile) => ({
+      name: String(profile.name || "").trim(),
+      label: String(profile.name || "").trim(),
+      defaultDirectory: String(profile.default_directory || "").trim(),
+    })),
+  ];
+}
+
+function getWorkspaceNewSessionProfileName() {
+  try {
+    const stored = window.localStorage?.getItem(WORKSPACE_NEW_SESSION_PROFILE_STORAGE_KEY) || "";
+    const profileName = String(stored || "").trim();
+    if (!profileName) {
+      return "";
+    }
+
+    const profiles = Array.isArray(state.workspace.profiles) ? state.workspace.profiles : [];
+    if (!profiles.length) {
+      return profileName;
+    }
+
+    return profiles.some((profile) => String(profile?.name || "").trim() === profileName)
+      ? profileName
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function getWorkspaceNewSessionProfileLabel() {
+  const profileName = getWorkspaceNewSessionProfileName();
+  return profileName || t("workspace.sidebar.newSessionCustom");
+}
+
+function getWorkspaceNewSessionProfile(profileName) {
+  const name = String(profileName || "").trim();
+  if (!name) {
+    return null;
+  }
+
+  const profiles = Array.isArray(state.workspace.profiles) ? state.workspace.profiles : [];
+  return (
+    profiles.find((profile) => String(profile?.name || "").trim() === name) || null
+  );
+}
+
+function persistWorkspaceNewSessionProfile(profileName) {
+  const nextProfile = String(profileName || "").trim();
+  try {
+    window.localStorage?.setItem(WORKSPACE_NEW_SESSION_PROFILE_STORAGE_KEY, nextProfile);
+  } catch {
+    /* ignore */
+  }
+}
+
+function closeWorkspaceNewSessionProfileMenu(selectedSessionId = state.workspace.activeSessionId) {
+  if (!state.workspace.newSessionProfileMenuOpen) {
+    return;
+  }
+
+  state.workspace.newSessionProfileMenuOpen = false;
+  patchWorkspaceSidebar(selectedSessionId);
+}
+
+function setWorkspaceNewSessionProfile(profileName, selectedSessionId = state.workspace.activeSessionId) {
+  persistWorkspaceNewSessionProfile(profileName);
+  const profile = getWorkspaceNewSessionProfile(profileName);
+  state.workspace.selectedAgentEnvironment = String(profile?.agent_environment || "").trim();
+  state.workspace.newSessionProfileMenuOpen = false;
+  patchWorkspaceSidebar(selectedSessionId);
+}
+
+function getSessionParentId(session) {
+  return String(session?.parentSessionId || session?.parent_session_id || "").trim();
+}
+
+function renderAppServerLivenessIndicator(session) {
+  if (!session?.appServerId) {
+    return "";
+  }
+
+  const connected = Boolean(session.appServerConnected);
+  const stateLabel = connected ? "connected to interactive TUI" : "previously connected to interactive TUI";
+  return `<span class="session-liveness-indicator session-liveness-indicator-${connected ? "connected" : "disconnected"}" title="${stateLabel}" aria-label="${stateLabel}" role="img"></span>`;
+}
+
+function getWorkspaceSessionAncestorIds(sessionId, sessionMap) {
+  const ancestors = new Set();
+  const visited = new Set();
+  let currentId = String(sessionId || "").trim();
+
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    const currentSession = sessionMap.get(currentId);
+    if (!currentSession) {
+      break;
+    }
+
+    const parentId = getSessionParentId(currentSession);
+    if (!parentId) {
+      break;
+    }
+
+    ancestors.add(parentId);
+    currentId = parentId;
+  }
+
+  return ancestors;
+}
+
+function buildWorkspaceSessionRows(sessions, filters, selectedSessionId = "") {
+  const projectMap = new Map(state.sessions.projects.map((project) => [project.projectId, project]));
+  const sessionMap = new Map(sessions.map((session) => [session.sessionId, session]));
+  const directVisibility = new Map();
+  const includedCache = new Map();
+  const childrenMap = new Map();
+
+  for (const session of sessions) {
+    const parentId = getSessionParentId(session);
+    if (!parentId || !sessionMap.has(parentId)) {
+      continue;
+    }
+
+    const children = childrenMap.get(parentId) || [];
+    children.push(session);
+    childrenMap.set(parentId, children);
+  }
+
+  const sortKey = String(filters?.sort || state.sessions.sort || "activity_desc");
+
+  function isDirectlyVisible(session) {
+    const sessionId = String(session?.sessionId || "").trim();
+    if (!sessionId) {
+      return false;
+    }
+    if (directVisibility.has(sessionId)) {
+      return directVisibility.get(sessionId);
+    }
+
+    const visible = matchesSessionFilters(session, projectMap.get(session.projectId), filters);
+    directVisibility.set(sessionId, visible);
+    return visible;
+  }
+
+  function hasIncludedDescendant(sessionId) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId) {
+      return false;
+    }
+    if (includedCache.has(normalizedSessionId)) {
+      return includedCache.get(normalizedSessionId);
+    }
+
+    const descendants = sortSessions(childrenMap.get(normalizedSessionId) || [], sortKey);
+    const included = descendants.some((child) => isDirectlyVisible(child) || hasIncludedDescendant(child.sessionId));
+    includedCache.set(normalizedSessionId, included);
+    return included;
+  }
+
+  const forcedExpandedIds = getWorkspaceSessionAncestorIds(selectedSessionId, sessionMap);
+  const rows = [];
+
+  function visit(items, level) {
+    for (const session of sortSessions(items, sortKey)) {
+      const included = isDirectlyVisible(session) || hasIncludedDescendant(session.sessionId);
+      if (!included) {
+        continue;
+      }
+
+      const childItems = sortSessions(childrenMap.get(session.sessionId) || [], sortKey).filter(
+        (child) => isDirectlyVisible(child) || hasIncludedDescendant(child.sessionId),
+      );
+      const hasChildren = childItems.length > 0;
+      const collapsed = Boolean(state.workspace.collapsedSessionIds?.[session.sessionId]);
+      const expanded =
+        hasChildren &&
+        !collapsed &&
+        (forcedExpandedIds.has(session.sessionId) || Boolean(state.workspace.expandedSessionIds?.[session.sessionId]));
+
+      rows.push({
+        session,
+        level,
+        hasChildren,
+        expanded,
+        directVisible: isDirectlyVisible(session),
+      });
+
+      if (hasChildren && expanded) {
+        visit(childItems, level + 1);
+      }
+    }
+  }
+
+  const rootItems = sessions.filter((session) => {
+    const parentId = getSessionParentId(session);
+    return !parentId || !sessionMap.has(parentId);
+  });
+  visit(rootItems, 0);
+  return rows;
+}
+
+function renderWorkspaceSessionRow(row, selectedSessionId = "", selectedSessionIdSet = null) {
+  const session = row.session;
+  const project = state.sessions.projects.find((candidate) => candidate.projectId === session.projectId);
+  const displayStatus = getSessionDisplayStatus(session);
+  const showStatusPill = ["starting", "running", "stopping", "failed"].includes(displayStatus);
+  const isSelected = session.sessionId === selectedSessionId;
+  const indentStyle = row.level > 0 ? ` style="--session-indent:${row.level}"` : "";
+  const childClass = row.level > 0 ? " workspace-session-item--child" : "";
+  const directVisibleClass = row.directVisible ? "" : " workspace-session-item--ancestor";
+
+  return `
+    <div class="workspace-session-item-row"${indentStyle}>
+      <button
+        type="button"
+        class="workspace-session-item ${isSelected ? "workspace-session-item-active" : ""}${childClass}${directVisibleClass}"
+        data-open-session="${session.sessionId}"
+      >
+        <div class="workspace-session-item-head">
+          ${
+            row.hasChildren
+              ? `
+                <span
+                  role="button"
+                  tabindex="0"
+                  class="workspace-session-item-toggle"
+                  data-toggle-session-tree="${escapeHtml(session.sessionId)}"
+                  aria-label="${escapeHtml(row.expanded ? t("generic.collapse") : t("generic.expand"))}"
+                  aria-expanded="${row.expanded ? "true" : "false"}"
+                >
+                  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                    <path d="${row.expanded ? "M8 10l4 4 4-4" : "M10 6 16 12 10 18"}"></path>
+                  </svg>
+                </span>
+              `
+              : `<span class="workspace-session-item-toggle workspace-session-item-toggle-spacer" aria-hidden="true"></span>`
+          }
+          <span class="workspace-session-item-title">${escapeHtml(session.title || t("workspace.session.untitled"))}</span>
+          ${renderAppServerLivenessIndicator(session)}
+          ${session.appServerId ? `<span class="pill">app-server</span>` : ""}
+          ${showStatusPill ? `<span class="pill ${statusClass(displayStatus)}">${escapeHtml(sessionStatusLabel(displayStatus))}</span>` : ""}
+        </div>
+        <div class="workspace-session-item-meta">
+          <span>${escapeHtml(project?.name || session.projectId)}</span>
+        </div>
+        ${
+          session.lastAssistantContent
+            ? `<div class="workspace-session-item-preview">${escapeHtml(shortenText(session.lastAssistantContent, 90))}</div>`
+            : session.lastCommand
+              ? `<div class="workspace-session-item-preview">${escapeHtml(shortenText(session.lastCommand, 90))}</div>`
+              : ""
+        }
+      </button>
+    </div>
+  `;
+}
+
+async function createWorkspaceSessionForProjectPath(
+  projectPath,
+  startingPrompt = "",
+  agentEnvironment = state.workspace.selectedAgentEnvironment,
+) {
+  const normalizedProjectPath = normalizeProjectPathForComparison(projectPath);
+  if (!normalizedProjectPath) {
+    throw new Error("Profile default directory is missing.");
+  }
+
+  const refreshedProjects = await getProjects();
+  state.sessions.projects = Array.isArray(refreshedProjects.items) ? refreshedProjects.items : [];
+
+  let project = findExistingProjectByPath(normalizedProjectPath);
+  if (!project) {
+    const projectName = deriveProjectNameFromPath(normalizedProjectPath);
+    if (!projectName) {
+      throw new Error("Profile default directory is invalid.");
+    }
+
+    const createdProject = await createProject({
+      name: projectName,
+      path: normalizedProjectPath,
+      createMissing: false,
+    });
+    const refreshedAfterCreate = await getProjects();
+    state.sessions.projects = Array.isArray(refreshedAfterCreate.items) ? refreshedAfterCreate.items : [];
+    project =
+      state.sessions.projects.find(
+        (candidate) => normalizeProjectPathForComparison(candidate.path) === normalizedProjectPath,
+      ) || {
+        projectId: createdProject.projectId,
+        name: projectName,
+        path: normalizedProjectPath,
+      };
+  }
+
+  const session = await createSession({
+    projectId: project.projectId,
+    startingPrompt: normalizeSessionStartingPrompt(startingPrompt || ""),
+    agentEnvironment: agentEnvironment || undefined,
+  });
+  return session;
+}
+
+async function startWorkspaceNewSessionFromSelectedProfile(selectedSessionId = state.workspace.activeSessionId) {
+  const profileName = getWorkspaceNewSessionProfileName();
+  if (!profileName) {
+    openWorkspaceCreateSessionDialog();
+    return;
+  }
+
+  const profile = getWorkspaceNewSessionProfile(profileName);
+  const defaultDirectory = String(profile?.default_directory || "").trim();
+  if (!defaultDirectory) {
+    showToast(t("workspace.create.pathRequired"));
+    return;
+  }
+
+  state.workspace.newSessionProfileMenuOpen = false;
+  const launchPrefs = loadCodexLaunchPrefs();
+  if (launchPrefs.profile) {
+    launchPrefs.profile = "";
+    persistCodexLaunchPrefs(launchPrefs);
+  }
+  if (state.detail.codexLaunch?.profile) {
+    state.detail.codexLaunch.profile = "";
+  }
+  const startingPrompt = normalizeSessionStartingPrompt(profile?.starting_prompt || "");
+  const session = await createWorkspaceSessionForProjectPath(
+    defaultDirectory,
+    startingPrompt,
+    profile?.agent_environment || "",
+  );
+  window.location.hash = buildSessionDetailHash(
+    session.sessionId,
+    state.detail.filter,
+    state.detail.severity,
+    state.detail.search,
+    state.detail.autoScroll,
+  );
+}
+
+function ensureWorkspaceSidebarGlobalListeners() {
+  if (window.__workspaceSidebarListenersBound) {
+    return;
+  }
+
+  window.__workspaceSidebarListenersBound = true;
+
+  document.addEventListener(
+    "click",
+    (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) {
+        return;
+      }
+
+      const treeToggle = target.closest("[data-toggle-session-tree]");
+      if (treeToggle) {
+        event.preventDefault();
+        event.stopPropagation();
+        const sessionId = treeToggle.getAttribute("data-toggle-session-tree") || "";
+        const isExpanded = treeToggle.getAttribute("aria-expanded") === "true";
+        setWorkspaceSessionExpanded(sessionId, !isExpanded, state.workspace.activeSessionId);
+        return;
+      }
+
+      if (state.workspace.localeMenuOpen && !target.closest(".workspace-sidebar-locale")) {
+        state.workspace.localeMenuOpen = false;
+        patchWorkspaceSidebar(state.workspace.activeSessionId);
+        return;
+      }
+
+      if (
+        state.workspace.newSessionProfileMenuOpen &&
+        !target.closest(".workspace-sidebar-new-session-group")
+      ) {
+        state.workspace.newSessionProfileMenuOpen = false;
+        patchWorkspaceSidebar(state.workspace.activeSessionId);
+      }
+    },
+    true,
+  );
+
+  document.addEventListener("keydown", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const treeToggle = target?.closest("[data-toggle-session-tree]") || null;
+    if (treeToggle && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      event.stopPropagation();
+      const sessionId = treeToggle.getAttribute("data-toggle-session-tree") || "";
+      const isExpanded = treeToggle.getAttribute("aria-expanded") === "true";
+      setWorkspaceSessionExpanded(sessionId, !isExpanded, state.workspace.activeSessionId);
+      return;
+    }
+
+    if (event.key !== "Escape") {
+      return;
+    }
+
+    if (state.workspace.newSessionProfileMenuOpen) {
+      state.workspace.newSessionProfileMenuOpen = false;
+      patchWorkspaceSidebar(state.workspace.activeSessionId);
+      return;
+    }
+
+    if (state.workspace.localeMenuOpen) {
+      state.workspace.localeMenuOpen = false;
+      patchWorkspaceSidebar(state.workspace.activeSessionId);
+    }
+  });
+}
+
 function shouldAutotitleSession(session) {
   const title = String(session?.title || "").trim();
   return !title || GENERIC_SESSION_TITLES.has(title);
@@ -1575,6 +2378,13 @@ function renderWorkspaceCreateSessionDialog() {
   const projects = Array.isArray(state.sessions.projects) ? state.sessions.projects : [];
   const selectedProject =
     projects.find((project) => project.projectId === dialogState.selectedProjectId) || projects[0] || null;
+  const agentEnvironmentOptions = [
+    { name: "", label: t("workspace.create.agentEnvironmentLegacy") },
+    ...(Array.isArray(state.workspace.agentEnvironments) ? state.workspace.agentEnvironments : []).map((item) => ({
+      name: String(item?.name || ""),
+      label: String(item?.name || ""),
+    })),
+  ];
 
   if (dialogState.mode === "pick-project") {
     return `
@@ -1613,6 +2423,17 @@ function renderWorkspaceCreateSessionDialog() {
                 </div>
               `
           }
+          <label class="workspace-dialog-field">
+            <span>${escapeHtml(t("workspace.create.agentEnvironment"))}</span>
+            <select id="workspace-agent-environment" class="workspace-dialog-input">
+              ${agentEnvironmentOptions
+                .map(
+                  (item) =>
+                    `<option value="${escapeHtml(item.name)}" ${state.workspace.selectedAgentEnvironment === item.name ? "selected" : ""}>${escapeHtml(item.label)}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
         </div>
         <div class="workspace-dialog-foot workspace-dialog-foot-split">
           <div class="workspace-dialog-secondary-actions">
@@ -1660,6 +2481,17 @@ function renderWorkspaceCreateSessionDialog() {
         <div class="workspace-dialog-help">
           ${escapeHtml(t("workspace.create.projectHelp"))}
         </div>
+        <label class="workspace-dialog-field">
+          <span>${escapeHtml(t("workspace.create.agentEnvironment"))}</span>
+          <select id="workspace-agent-environment" class="workspace-dialog-input">
+            ${agentEnvironmentOptions
+              .map(
+                (item) =>
+                  `<option value="${escapeHtml(item.name)}" ${state.workspace.selectedAgentEnvironment === item.name ? "selected" : ""}>${escapeHtml(item.label)}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
         <div class="workspace-dialog-field">
           <span>${escapeHtml(t("workspace.create.currentDirectory"))}</span>
           <div class="workspace-directory-browser">
@@ -1842,8 +2674,7 @@ function renderWorkspaceModalSlot() {
 }
 
 function renderWorkspaceSidebar(selectedSessionId = "") {
-  const projectMap = new Map(state.sessions.projects.map((project) => [project.projectId, project]));
-  const filteredSessions = getWorkspaceFilteredSessions();
+  const workspaceSessionRows = buildWorkspaceSessionRows(state.sessions.items, state.sessions, selectedSessionId);
   const localeOptions = listSupportedLocales();
 
   return `
@@ -1907,42 +2738,55 @@ function renderWorkspaceSidebar(selectedSessionId = "") {
       </div>
 
       <div class="workspace-sidebar-actions">
-        <button id="workspace-create-session" type="button" class="primary-button">${escapeHtml(t("workspace.sidebar.newSession"))}</button>
+        <div class="workspace-sidebar-new-session-group" role="group" aria-label="${escapeHtml(t("workspace.sidebar.newSessionProfileMenu"))}">
+          <button
+            id="workspace-new-session-profile-toggle"
+            type="button"
+            class="workspace-sidebar-new-session-toggle"
+            aria-haspopup="menu"
+            aria-expanded="${state.workspace.newSessionProfileMenuOpen ? "true" : "false"}"
+            aria-label="${escapeHtml(t("workspace.sidebar.newSessionProfileMenu"))}"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path d="m6 9 6 6 6-6"></path>
+            </svg>
+          </button>
+          <button id="workspace-create-session" type="button" class="workspace-sidebar-new-session-main">
+            <span class="workspace-sidebar-new-session-main-label">${escapeHtml(t("workspace.sidebar.newSession"))}</span>
+            <span class="workspace-sidebar-new-session-main-profile">${escapeHtml(getWorkspaceNewSessionProfileLabel())}</span>
+          </button>
+          ${
+            state.workspace.newSessionProfileMenuOpen
+              ? `
+                <div class="workspace-sidebar-new-session-menu" role="menu" aria-label="${escapeHtml(t("workspace.sidebar.newSessionProfileMenu"))}">
+                  ${getWorkspaceNewSessionProfileItems()
+                    .map((item) => {
+                      const active = item.name === getWorkspaceNewSessionProfileName();
+                      return `
+                        <button
+                          type="button"
+                          class="workspace-sidebar-new-session-option ${active ? "workspace-sidebar-new-session-option-active" : ""}"
+                          data-workspace-new-session-profile="${escapeHtml(item.name)}"
+                          role="menuitemradio"
+                          aria-checked="${active ? "true" : "false"}"
+                        >
+                          <span class="workspace-sidebar-new-session-option-check">${active ? "✓" : ""}</span>
+                          <span class="workspace-sidebar-new-session-option-label">${escapeHtml(item.label)}</span>
+                        </button>
+                      `;
+                    })
+                    .join("")}
+                </div>
+              `
+              : ""
+          }
+        </div>
       </div>
 
       <div class="workspace-session-list" id="workspace-session-list">
         ${
-          filteredSessions.length > 0
-            ? filteredSessions
-                .map((session) => {
-                  const project = projectMap.get(session.projectId);
-                  const displayStatus = getSessionDisplayStatus(session);
-                  const showStatusPill = ["starting", "running", "stopping", "failed"].includes(displayStatus);
-                  const selected = session.sessionId === selectedSessionId;
-                  return `
-                    <button
-                      type="button"
-                      class="workspace-session-item ${selected ? "workspace-session-item-active" : ""}"
-                      data-open-session="${session.sessionId}"
-                    >
-                      <div class="workspace-session-item-head">
-                        <span class="workspace-session-item-title">${escapeHtml(session.title || t("workspace.session.untitled"))}</span>
-                        ${showStatusPill ? `<span class="pill ${statusClass(displayStatus)}">${escapeHtml(sessionStatusLabel(displayStatus))}</span>` : ""}
-                      </div>
-                      <div class="workspace-session-item-meta">
-                        <span>${escapeHtml(project?.name || session.projectId)}</span>
-                      </div>
-                      ${
-                        session.lastAssistantContent
-                          ? `<div class="workspace-session-item-preview">${escapeHtml(shortenText(session.lastAssistantContent, 90))}</div>`
-                          : session.lastCommand
-                            ? `<div class="workspace-session-item-preview">${escapeHtml(shortenText(session.lastCommand, 90))}</div>`
-                            : ""
-                      }
-                    </button>
-                  `;
-                })
-                .join("")
+          workspaceSessionRows.length > 0
+            ? workspaceSessionRows.map((row) => renderWorkspaceSessionRow(row, selectedSessionId)).join("")
             : `<div class="workspace-session-empty">${escapeHtml(t("workspace.sidebar.empty"))}</div>`
         }
       </div>
@@ -1992,6 +2836,7 @@ function closeWorkspaceCreateDialog() {
   state.workspace.createDialog.browserParentPath = "";
   state.workspace.createDialog.browserItems = [];
   state.workspace.createDialog.error = "";
+  state.workspace.newSessionProfileMenuOpen = false;
   patchWorkspaceModalSlot();
 }
 
@@ -2012,6 +2857,7 @@ function openWorkspaceCreateSessionDialog() {
   state.workspace.createDialog.browserParentPath = "";
   state.workspace.createDialog.browserItems = [];
   state.workspace.createDialog.error = "";
+  state.workspace.newSessionProfileMenuOpen = false;
   patchWorkspaceModalSlot();
 }
 
@@ -2025,7 +2871,10 @@ async function submitWorkspaceCreateSession() {
   patchWorkspaceModalSlot();
 
   try {
-    const session = await createSession({ projectId });
+    const session = await createSession({
+      projectId,
+      agentEnvironment: state.workspace.selectedAgentEnvironment || undefined,
+    });
     closeWorkspaceCreateDialog();
     window.location.hash = buildSessionDetailHash(
       session.sessionId,
@@ -2066,7 +2915,10 @@ async function submitWorkspaceProjectDialog() {
         path: targetPath,
         createMissing: createInSelectedDirectory,
       }));
-    const session = await createSession({ projectId: project.projectId });
+    const session = await createSession({
+      projectId: project.projectId,
+      agentEnvironment: state.workspace.selectedAgentEnvironment || undefined,
+    });
     closeWorkspaceCreateDialog();
     window.location.hash = buildSessionDetailHash(
       session.sessionId,
@@ -2328,6 +3180,13 @@ function bindWorkspaceCreateDialogControls() {
     };
   });
 
+  const agentEnvironmentSelect = document.querySelector("#workspace-agent-environment");
+  if (agentEnvironmentSelect instanceof HTMLSelectElement) {
+    agentEnvironmentSelect.onchange = () => {
+      state.workspace.selectedAgentEnvironment = agentEnvironmentSelect.value;
+    };
+  }
+
   const submitSessionButton = document.querySelector("#workspace-create-session-submit");
   if (submitSessionButton instanceof HTMLButtonElement) {
     submitSessionButton.onclick = async () => {
@@ -2344,11 +3203,14 @@ function bindWorkspaceCreateDialogControls() {
 }
 
 function bindWorkspaceSidebarControls(selectedSessionId = "") {
+  ensureWorkspaceSidebarGlobalListeners();
+
   const toggleButton = document.querySelector("#workspace-sidebar-toggle");
   if (toggleButton instanceof HTMLButtonElement) {
     toggleButton.onclick = () => {
       state.workspace.sidebarCollapsed = !state.workspace.sidebarCollapsed;
       state.workspace.localeMenuOpen = false;
+      state.workspace.newSessionProfileMenuOpen = false;
       writeWorkspaceUiState();
       syncWorkspaceShellState();
       patchWorkspaceSidebar(selectedSessionId);
@@ -2358,15 +3220,16 @@ function bindWorkspaceSidebarControls(selectedSessionId = "") {
   const overlay = document.querySelector("#workspace-sidebar-overlay");
   if (overlay instanceof HTMLElement) {
     overlay.onclick = () => {
-      if (state.workspace.sidebarCollapsed) {
-        return;
-      }
-      state.workspace.sidebarCollapsed = true;
-      state.workspace.localeMenuOpen = false;
-      writeWorkspaceUiState();
-      syncWorkspaceShellState();
-      patchWorkspaceSidebar(selectedSessionId);
-    };
+    if (state.workspace.sidebarCollapsed) {
+      return;
+    }
+    state.workspace.sidebarCollapsed = true;
+    state.workspace.localeMenuOpen = false;
+    state.workspace.newSessionProfileMenuOpen = false;
+    writeWorkspaceUiState();
+    syncWorkspaceShellState();
+    patchWorkspaceSidebar(selectedSessionId);
+  };
   }
 
   const closeButton = document.querySelector("#workspace-sidebar-close");
@@ -2374,6 +3237,7 @@ function bindWorkspaceSidebarControls(selectedSessionId = "") {
     closeButton.onclick = () => {
       state.workspace.sidebarCollapsed = true;
       state.workspace.localeMenuOpen = false;
+      state.workspace.newSessionProfileMenuOpen = false;
       writeWorkspaceUiState();
       syncWorkspaceShellState();
       patchWorkspaceSidebar(selectedSessionId);
@@ -2385,6 +3249,9 @@ function bindWorkspaceSidebarControls(selectedSessionId = "") {
     localeToggle.onclick = (event) => {
       event.stopPropagation();
       state.workspace.localeMenuOpen = !state.workspace.localeMenuOpen;
+      if (state.workspace.localeMenuOpen) {
+        state.workspace.newSessionProfileMenuOpen = false;
+      }
       patchWorkspaceSidebar(selectedSessionId);
     };
   }
@@ -2409,18 +3276,43 @@ function bindWorkspaceSidebarControls(selectedSessionId = "") {
   if (createButton instanceof HTMLButtonElement) {
     createButton.onclick = async () => {
       state.workspace.localeMenuOpen = false;
+      state.workspace.newSessionProfileMenuOpen = false;
       try {
-        openWorkspaceCreateSessionDialog();
+        await startWorkspaceNewSessionFromSelectedProfile(selectedSessionId);
       } catch (error) {
         showToast(messageOf(error));
       }
     };
   }
 
+  const profileToggle = document.querySelector("#workspace-new-session-profile-toggle");
+  if (profileToggle instanceof HTMLButtonElement) {
+    profileToggle.onclick = (event) => {
+      event.stopPropagation();
+      state.workspace.newSessionProfileMenuOpen = !state.workspace.newSessionProfileMenuOpen;
+      if (state.workspace.newSessionProfileMenuOpen) {
+        state.workspace.localeMenuOpen = false;
+      }
+      patchWorkspaceSidebar(selectedSessionId);
+    };
+  }
+
+  document.querySelectorAll("[data-workspace-new-session-profile]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+
+    button.onclick = () => {
+      const profileName = String(button.dataset.workspaceNewSessionProfile || "");
+      setWorkspaceNewSessionProfile(profileName, selectedSessionId);
+    };
+  });
+
   const importButton = document.querySelector("#workspace-import-session");
   if (importButton instanceof HTMLButtonElement) {
     importButton.onclick = async () => {
       state.workspace.localeMenuOpen = false;
+      state.workspace.newSessionProfileMenuOpen = false;
       try {
         await handleImportCodexSession();
       } catch (error) {
@@ -2433,7 +3325,8 @@ function bindWorkspaceSidebarControls(selectedSessionId = "") {
   if (emptyCreateButton instanceof HTMLButtonElement) {
     emptyCreateButton.onclick = async () => {
       try {
-        openWorkspaceCreateSessionDialog();
+        state.workspace.newSessionProfileMenuOpen = false;
+        await startWorkspaceNewSessionFromSelectedProfile(selectedSessionId);
       } catch (error) {
         showToast(messageOf(error));
       }
@@ -2444,6 +3337,7 @@ function bindWorkspaceSidebarControls(selectedSessionId = "") {
   if (emptyImportButton instanceof HTMLButtonElement) {
     emptyImportButton.onclick = async () => {
       try {
+        state.workspace.newSessionProfileMenuOpen = false;
         await handleImportCodexSession();
       } catch (error) {
         showToast(messageOf(error));
@@ -2500,6 +3394,44 @@ function bindWorkspaceSidebarControls(selectedSessionId = "") {
   });
 }
 
+function loadWorkspaceCollections() {
+  if (state.runtime.collectionsPromise) {
+    return state.runtime.collectionsPromise;
+  }
+
+  state.runtime.collectionsPromise = Promise.all([
+    getSessions(),
+    getProjects(),
+    getAgentEnvironments().catch(() => ({ items: [] })),
+  ])
+    .then(([sessions, projects, agentEnvironmentResult]) => {
+      state.sessions.items = Array.isArray(sessions?.items) ? sessions.items : [];
+      state.sessions.projects = Array.isArray(projects?.items) ? projects.items : [];
+      state.workspace.agentEnvironments = Array.isArray(agentEnvironmentResult?.items)
+        ? agentEnvironmentResult.items
+        : [];
+      return { sessions, projects, agentEnvironmentResult };
+    })
+    .finally(() => {
+      state.runtime.collectionsPromise = null;
+    });
+
+  return state.runtime.collectionsPromise;
+}
+
+function loadRuntimeValue(key, loader) {
+  if (state.runtime[key]) {
+    return Promise.resolve(state.runtime[key]);
+  }
+
+  return loader().then((value) => {
+    if (value) {
+      state.runtime[key] = value;
+    }
+    return value;
+  });
+}
+
 async function renderWorkspacePage(routeSessionId) {
   if (isMobileWorkspaceViewport()) {
     state.workspace.sidebarCollapsed = true;
@@ -2514,9 +3446,15 @@ async function renderWorkspacePage(routeSessionId) {
   bindWorkspaceImportDialogControls();
 
   try {
-    const [sessions, projects] = await Promise.all([getSessions(), getProjects()]);
-    state.sessions.items = sessions.items;
-    state.sessions.projects = projects.items;
+    if (hasWarmWorkspaceCache(state.sessions.items, state.sessions.projects)) {
+      void loadWorkspaceCollections().then(() => {
+        if (parseHashRoute(window.location.hash || "").path.startsWith("#/sessions")) {
+          patchWorkspaceSidebar(state.workspace.activeSessionId);
+        }
+      }).catch(() => null);
+    } else {
+      await loadWorkspaceCollections();
+    }
 
     const selectedSessionId = resolveWorkspaceSessionId(routeSessionId);
     state.workspace.activeSessionId = selectedSessionId;
@@ -2703,9 +3641,7 @@ async function renderSessionsPage() {
   });
 
   try {
-    const [sessions, projects] = await Promise.all([getSessions(), getProjects()]);
-    state.sessions.items = sessions.items;
-    state.sessions.projects = projects.items;
+    await loadWorkspaceCollections();
 
     renderSessionsList();
   } catch (error) {
@@ -2775,23 +3711,24 @@ async function handleImportCodexSession() {
 }
 
 function renderSessionsList() {
+  ensureWorkspaceSidebarGlobalListeners();
   const projectMap = new Map(state.sessions.projects.map((project) => [project.projectId, project]));
   const filteredSessions = state.sessions.items.filter((session) =>
     matchesSessionFilters(session, projectMap.get(session.projectId), state.sessions),
   );
+  const sessionRows = buildWorkspaceSessionRows(state.sessions.items, state.sessions, "");
   const statusOptions = getSessionStatusOptions(state.sessions.items);
   const projectOptions = getSessionProjectOptions(state.sessions.projects, state.sessions.items);
   const threadOptions = getThreadFilterOptions(state.sessions.items);
   const sortOptions = getSessionSortOptions();
   const activeFilters = countActiveSessionFilters(state.sessions);
-  const sortedSessions = sortSessions(filteredSessions, state.sessions.sort);
-  const totalPages = getPageCount(sortedSessions.length, state.sessions.pageSize);
+  const totalPages = getPageCount(sessionRows.length, state.sessions.pageSize);
   state.sessions.page = clampPage(state.sessions.page, totalPages);
   const pageStart = (state.sessions.page - 1) * state.sessions.pageSize;
-  const pagedSessions = sortedSessions.slice(pageStart, pageStart + state.sessions.pageSize);
+  const pagedSessions = sessionRows.slice(pageStart, pageStart + state.sessions.pageSize);
   const pageNumbers = getVisiblePageNumbers(state.sessions.page, totalPages);
-  const pageEnd = sortedSessions.length
-    ? Math.min(pageStart + state.sessions.pageSize, sortedSessions.length)
+  const pageEnd = sessionRows.length
+    ? Math.min(pageStart + state.sessions.pageSize, sessionRows.length)
     : 0;
   persistSessionsViewState();
 
@@ -2904,48 +3841,81 @@ function renderSessionsList() {
           ${
             pagedSessions.length > 0
               ? pagedSessions
-                  .map((session) => {
+                  .map((row) => {
+                    const session = row.session;
                     const project = projectMap.get(session.projectId);
                     const displayStatus = getSessionDisplayStatus(session);
+                    const isSelected = state.workspace.activeSessionId === session.sessionId;
                     return `
-                      <article class="record-card session-card list-row-card" data-open-session="${session.sessionId}">
-                        <div class="record-title-row">
-                          <h3>${escapeHtml(session.title || t("workspace.session.untitled"))}</h3>
-                          <span class="pill ${statusClass(displayStatus)}">${escapeHtml(sessionStatusLabel(displayStatus))}</span>
-                        </div>
-                        <p class="record-meta">${escapeHtml(t("sessions.projectMeta", { value: project?.name || session.projectId }))}</p>
-                        <p class="record-meta">${escapeHtml(t("sessions.lastEventMeta", { value: session.lastEventAt || t("generic.none") }))}</p>
-                        <div class="summary-strip">
-                          <span class="summary-chip">${escapeHtml(t("sessions.eventCount", { count: session.eventCount ?? 0 }))}</span>
+                      <div class="session-tree-row" ${row.level > 0 ? `style="--session-indent:${row.level}"` : ""}>
+                        <button
+                          type="button"
+                          class="workspace-session-item session-card list-row-card ${isSelected ? "workspace-session-item-active" : ""}${row.level > 0 ? " workspace-session-item--child" : ""}${row.directVisible ? "" : " workspace-session-item--ancestor"}"
+                          data-open-session="${session.sessionId}"
+                        >
+                          <div class="record-title-row">
+                            ${
+                              row.hasChildren
+                                ? `
+                                  <span
+                                    role="button"
+                                    tabindex="0"
+                                    class="workspace-session-item-toggle"
+                                    data-toggle-session-tree="${escapeHtml(session.sessionId)}"
+                                    aria-label="${escapeHtml(row.expanded ? t("generic.collapse") : t("generic.expand"))}"
+                                    aria-expanded="${row.expanded ? "true" : "false"}"
+                                  >
+                                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                                      <path d="${row.expanded ? "M8 10l4 4 4-4" : "M10 6 16 12 10 18"}"></path>
+                                    </svg>
+                                  </span>
+                                `
+                                : `<span class="workspace-session-item-toggle workspace-session-item-toggle-spacer" aria-hidden="true"></span>`
+                            }
+                            <h3>${escapeHtml(session.title || t("workspace.session.untitled"))}</h3>
+                            ${renderAppServerLivenessIndicator(session)}
+                            <span class="pill ${statusClass(displayStatus)}">${escapeHtml(sessionStatusLabel(displayStatus))}</span>
+                          </div>
+                          <p class="record-meta">${escapeHtml(t("sessions.projectMeta", { value: project?.name || session.projectId }))}</p>
+                          <p class="record-meta">${escapeHtml(project?.path || t("sessions.workingDirectoryMissing"))}</p>
+                          <p class="record-meta">${escapeHtml(t("sessions.lastEventMeta", { value: session.lastEventAt || t("generic.none") }))}</p>
+                          <div class="summary-strip">
+                            <span class="summary-chip">${escapeHtml(t("sessions.eventCount", { count: session.eventCount ?? 0 }))}</span>
+                            ${
+                              session.codexThreadId
+                                ? `<span class="summary-chip">${escapeHtml(t("sessions.threadReady"))}</span>`
+                                : `<span class="summary-chip">${escapeHtml(t("sessions.threadMissing"))}</span>`
+                            }
+                            ${
+                              session.pendingApproval
+                                ? `<span class="summary-chip summary-chip-warn">${escapeHtml(t("sessions.pendingApproval"))}</span>`
+                                : ""
+                            }
+                          </div>
                           ${
-                            session.codexThreadId
-                              ? `<span class="summary-chip">${escapeHtml(t("sessions.threadReady"))}</span>`
-                              : `<span class="summary-chip">${escapeHtml(t("sessions.threadMissing"))}</span>`
+                            session.pendingApproval?.reason
+                              ? `<p class="record-summary"><strong>${escapeHtml(t("sessions.pendingApprovalTitle"))}</strong> ${escapeHtml(shortenText(session.pendingApproval.reason, 120))}</p>`
+                              : session.pendingApproval?.command
+                                ? `<p class="record-summary"><strong>${escapeHtml(t("sessions.pendingApprovalTitle"))}</strong> ${escapeHtml(shortenText(session.pendingApproval.command, 120))}</p>`
+                                : ""
                           }
                           ${
-                            session.pendingApproval
-                              ? `<span class="summary-chip summary-chip-warn">${escapeHtml(t("sessions.pendingApproval"))}</span>`
+                            session.lastCommand
+                              ? `<p class="record-summary"><strong>${escapeHtml(t("sessions.lastCommandTitle"))}</strong> ${escapeHtml(shortenText(session.lastCommand, 120))}</p>`
                               : ""
                           }
-                        </div>
-                        ${
-                          session.pendingApproval?.reason
-                            ? `<p class="record-summary"><strong>${escapeHtml(t("sessions.pendingApprovalTitle"))}</strong> ${escapeHtml(shortenText(session.pendingApproval.reason, 120))}</p>`
-                            : session.pendingApproval?.command
-                              ? `<p class="record-summary"><strong>${escapeHtml(t("sessions.pendingApprovalTitle"))}</strong> ${escapeHtml(shortenText(session.pendingApproval.command, 120))}</p>`
+                          ${
+                            session.lastAssistantContent
+                              ? `<p class="record-summary"><strong>${escapeHtml(t("sessions.lastReplyTitle"))}</strong> ${escapeHtml(shortenText(session.lastAssistantContent, 140))}</p>`
                               : ""
-                        }
+                          }
+                        </button>
                         ${
-                          session.lastCommand
-                            ? `<p class="record-summary"><strong>${escapeHtml(t("sessions.lastCommandTitle"))}</strong> ${escapeHtml(shortenText(session.lastCommand, 120))}</p>`
+                          session.sessionUrl
+                            ? `<a class="session-open-link" href="${escapeHtml(session.sessionUrl)}">${escapeHtml(t("sessions.openSession"))}</a>`
                             : ""
                         }
-                        ${
-                          session.lastAssistantContent
-                            ? `<p class="record-summary"><strong>${escapeHtml(t("sessions.lastReplyTitle"))}</strong> ${escapeHtml(shortenText(session.lastAssistantContent, 140))}</p>`
-                            : ""
-                        }
-                      </article>
+                      </div>
                     `;
                   })
                   .join("")
@@ -2954,7 +3924,7 @@ function renderSessionsList() {
         </div>
 
         ${
-          sortedSessions.length > 0
+          sessionRows.length > 0
             ? `
               <div class="session-pagination">
                 <div class="session-page-meta">
@@ -2962,7 +3932,7 @@ function renderSessionsList() {
                     t("sessions.pageRange", {
                       start: pageStart + 1,
                       end: pageEnd,
-                      total: sortedSessions.length,
+                      total: sessionRows.length,
                     }),
                   )}</span>
                   <span>${escapeHtml(
@@ -3129,11 +4099,20 @@ async function renderSessionDetailPage(sessionId) {
   const previousSessionId = String(state.detail.session?.sessionId || "").trim();
   if (previousSessionId !== normalizedSessionId) {
     state.detail.dismissedApprovalKeys = {};
+    state.detail.clientLogs = [];
+    state.detail.replySocketAttempt = 0;
+    state.detail.startingPrompt = "";
   }
 
   state.workspace.activeSessionId = normalizedSessionId;
   const loadRequestId = Number(state.detail.loadRequestId || 0) + 1;
   state.detail.loadRequestId = loadRequestId;
+  state.detail.replyCorrelationId = `reply-ui:${normalizedSessionId}:${loadRequestId}`;
+  pushClientDebugLog("info", "Opening session detail", {
+    sessionId: normalizedSessionId,
+    previousSessionId,
+    loadRequestId,
+  });
   const isStaleDetailLoad = () =>
     state.detail.loadRequestId !== loadRequestId || state.workspace.activeSessionId !== normalizedSessionId;
   const mainSlot = document.querySelector("#workspace-main-slot");
@@ -3151,20 +4130,23 @@ async function renderSessionDetailPage(sessionId) {
   }
 
   try {
-    await syncImportedSession(normalizedSessionId).catch(() => null);
-    if (isStaleDetailLoad()) {
-      return;
-    }
-
-    const [session, eventData, uiOptionsResult, hostsResult] = await Promise.all([
+    const [session, eventData, uiOptionsResult, hostsResult, profilesResult] = await Promise.all([
       getSession(normalizedSessionId),
       loadInitialSessionEvents(normalizedSessionId),
-      getCodexUiOptions().catch(() => null),
-      getCodexHosts().catch(() => null),
+      loadRuntimeValue("uiOptions", () => getCodexUiOptions().catch(() => null)),
+      loadRuntimeValue("hosts", () => getCodexHosts().catch(() => null)),
+      loadRuntimeValue("profiles", () => getProfiles().catch(() => null)),
     ]);
     if (isStaleDetailLoad()) {
       return;
     }
+    pushClientDebugLog("info", "Loaded session snapshot", {
+      sessionId: normalizedSessionId,
+      eventCount: Array.isArray(eventData.items) ? eventData.items.length : 0,
+      beforeCursor: Number(eventData.beforeCursor || 0),
+      lastSeq: Number(eventData.lastSeq || eventData.nextCursor || 0),
+      hasMoreBefore: Boolean(eventData.hasMoreBefore),
+    });
 
     const uiOptions =
       uiOptionsResult &&
@@ -3174,15 +4156,6 @@ async function renderSessionDetailPage(sessionId) {
       uiOptionsResult.reasoningLevels.length > 0
         ? uiOptionsResult
         : CLIENT_FALLBACK_CODEX_UI_OPTIONS;
-    const codexStatus = await getCodexStatus({
-      sessionId: normalizedSessionId,
-      threadId: session.codexThreadId || "",
-      cwd: session.projectPath || "",
-    }).catch(() => null);
-    if (isStaleDetailLoad()) {
-      return;
-    }
-
     state.detail.session = session;
     replaceDetailTimelineRawEvents(eventData.items);
     syncDetailPendingApproval(session, state.detail.timelineState);
@@ -3199,6 +4172,12 @@ async function renderSessionDetailPage(sessionId) {
     state.detail.rawStdoutBuckets = {};
     state.detail.codexUiOptions = uiOptions;
     state.detail.codexLaunch = normalizeCodexLaunchAgainstUi(loadCodexLaunchPrefs(), uiOptions);
+    state.detail.startingPrompt = normalizeSessionStartingPrompt(session.startingPrompt || "");
+    state.detail.composerRefreshRequested = false;
+    state.workspace.profiles =
+      profilesResult && Array.isArray(profilesResult.items)
+        ? profilesResult.items.filter((profile) => profile && typeof profile.name === "string")
+        : [];
     state.detail.remoteHosts =
       hostsResult && Array.isArray(hostsResult.hosts)
         ? hostsResult.hosts.filter((item) => typeof item === "string" && item.trim())
@@ -3226,8 +4205,14 @@ async function renderSessionDetailPage(sessionId) {
     state.detail.inspectSelectionKey = "";
     state.detail.optimisticSend = null;
     state.detail.codexQuota = readCachedCodexQuota(normalizedSessionId);
-    state.detail.codexStatus = codexStatus;
+    state.detail.codexStatus = state.runtime.codexStatusBySession[normalizedSessionId] || null;
     state.socketState = "connecting";
+    pushClientDebugLog("debug", "Prepared session detail state", {
+      sessionId: normalizedSessionId,
+      socketState: state.socketState,
+      autoScroll: state.detail.autoScroll,
+      remoteHosts: state.detail.remoteHosts.length,
+    });
 
     const detailQuery = parseHashRoute(window.location.hash || "").query || "";
     const followParam = new URLSearchParams(detailQuery).get("follow");
@@ -3241,6 +4226,7 @@ async function renderSessionDetailPage(sessionId) {
     }
 
     attachSessionSocket(normalizedSessionId);
+    void refreshCodexStatus(normalizedSessionId);
     void catchUpSessionEvents(normalizedSessionId, state.detail.cursor)
       .then(() => {
         if (!isStaleDetailLoad()) {
@@ -3248,8 +4234,12 @@ async function renderSessionDetailPage(sessionId) {
         }
       })
       .catch(() => null);
-    scheduleImportedSessionSync(normalizedSessionId);
+    scheduleImportedSessionSync(normalizedSessionId, 0);
   } catch (error) {
+    pushClientDebugLog("error", "Failed to load session detail", {
+      sessionId: normalizedSessionId,
+      error: messageOf(error),
+    });
     if (isStaleDetailLoad()) {
       return;
     }
@@ -3448,15 +4438,21 @@ function renderSessionDetail() {
   if (
     composerSlot &&
     (!shellMounted || state.detail.lastComposerHtml !== composerInputHtml) &&
-    (!shellMounted || !composerFocused)
+    (!shellMounted ||
+      !composerFocused ||
+      state.detail.voiceRecording ||
+      state.detail.voiceTranscribing ||
+      state.detail.composerRefreshRequested)
   ) {
     composerSlot.innerHTML = composerInputHtml;
     state.detail.lastComposerHtml = composerInputHtml;
+    state.detail.composerRefreshRequested = false;
   }
 
   const composerTextarea = document.querySelector('textarea[name="content"]');
   const messageFormEl = document.querySelector("#message-form");
   const composerActionFab = document.querySelector("#composer-action");
+  const composerVoiceFab = document.querySelector("#composer-voice-action");
 
   function syncComposerActionState() {
     if (!composerActionFab || !composerTextarea) {
@@ -3465,25 +4461,39 @@ function renderSessionDetail() {
 
     if (composerIsBusy) {
       composerActionFab.disabled = false;
-      return;
+    } else {
+      composerActionFab.disabled =
+        state.detail.voiceRecording ||
+        state.detail.voiceTranscribing ||
+        !composerTextarea.value.trim();
     }
 
-    composerActionFab.disabled = !composerTextarea.value.trim();
+    if (composerVoiceFab) {
+      composerVoiceFab.disabled = composerIsBusy || state.detail.voiceTranscribing;
+    }
   }
 
-  async function sendComposerMessage() {
-    const content = String(composerTextarea?.value || "").trim();
-    if (!content) {
+  async function submitPromptContent(content, submitRequest, options = {}) {
+    const promptText = String(content || "").trim();
+    const clearDraft = options.clearDraft !== false;
+    const restoreDraftOnError = options.restoreDraftOnError !== false;
+    const restoreDraftText = String(options.restoreDraftText ?? promptText).trim();
+    if (!promptText) {
       return;
     }
 
+    pushClientDebugLog("info", "Submitting prompt", {
+      sessionId: session.sessionId,
+      promptLength: promptText.length,
+      clearDraft,
+    });
     const optimisticTimestamp = new Date().toISOString();
     const optimisticSend = {
       sessionId: session.sessionId,
       tempTurnId: `optimistic-turn:${Date.now()}`,
       userItemId: `optimistic-user:${Date.now()}`,
       thinkingItemId: `optimistic-thinking:${Date.now()}`,
-      text: content,
+      text: promptText,
       createdAt: optimisticTimestamp,
       confirmed: false,
       turnId: null,
@@ -3495,13 +4505,8 @@ function renderSessionDetail() {
     };
 
     try {
-      const codex = buildCodexLaunchPayload(
-        state.detail.codexLaunch,
-        state.detail.codexUiOptions,
-      );
-      const payload = codex ? { content, codex } : { content };
       if (state.detail.session && shouldAutotitleSession(state.detail.session)) {
-        const nextTitle = deriveSessionTitleFromMessage(content);
+        const nextTitle = deriveSessionTitleFromMessage(promptText);
         state.detail.session.title = nextTitle;
         state.sessions.items = state.sessions.items.map((item) =>
           item.sessionId === session.sessionId ? { ...item, title: nextTitle } : item,
@@ -3514,8 +4519,10 @@ function renderSessionDetail() {
         state.detail.session.updatedAt = optimisticTimestamp;
       }
       state.detail.optimisticSend = optimisticSend;
-      state.detail.draft = "";
-      if (composerTextarea) {
+      if (clearDraft) {
+        state.detail.draft = "";
+      }
+      if (clearDraft && composerTextarea) {
         composerTextarea.value = "";
         adjustComposerHeight(composerTextarea);
         window.requestAnimationFrame(() => adjustComposerHeight(composerTextarea));
@@ -3523,7 +4530,13 @@ function renderSessionDetail() {
       syncComposerActionState();
       scheduleSessionDetailRender();
 
-      const result = await sendMessage(session.sessionId, payload);
+      const result = await submitRequest();
+      pushClientDebugLog("info", "Prompt submission acknowledged", {
+        sessionId: session.sessionId,
+        eventId: result.eventId || "",
+        seq: Number(result.seq || 0),
+        turnId: result.turnId || "",
+      });
       if (state.detail.optimisticSend?.userItemId === optimisticSend.userItemId) {
         state.detail.optimisticSend = {
           ...state.detail.optimisticSend,
@@ -3540,15 +4553,19 @@ function renderSessionDetail() {
           type: "message.user",
           turnId: result.turnId,
           payload: {
-            text: content,
+            text: promptText,
           },
         },
       ]);
       state.detail.cursor = Math.max(state.detail.cursor, Number(result.seq || 0));
       scheduleSessionDetailRender();
     } catch (error) {
+      pushClientDebugLog("error", "Prompt submission failed", {
+        sessionId: session.sessionId,
+        error: messageOf(error),
+      });
       clearOptimisticSend({
-        restoreDraft: content,
+        restoreDraft: restoreDraftOnError ? restoreDraftText : "",
         restoreSession: true,
         restoreTitle: true,
       });
@@ -3559,11 +4576,136 @@ function renderSessionDetail() {
     }
   }
 
+  async function sendComposerMessage() {
+    const content = String(composerTextarea?.value || "").trim();
+    const finalContent = content; // The server consumes the profile prompt exactly once.
+    if (state.detail.startingPrompt) {
+      state.detail.startingPrompt = "";
+      state.detail.composerRefreshRequested = true;
+      scheduleSessionDetailRender();
+    }
+    const codex = buildCodexLaunchPayload(
+      state.detail.codexLaunch,
+      state.detail.codexUiOptions,
+    );
+    const payload = codex ? { content: finalContent, codex } : { content: finalContent };
+    pushClientDebugLog("debug", "Dispatching composer message", {
+      sessionId: session.sessionId,
+      contentLength: finalContent.length,
+      hasCodexOverrides: Boolean(codex),
+    });
+    await submitPromptContent(finalContent, () => sendMessage(session.sessionId, payload), {
+      restoreDraftText: content,
+    });
+  }
+
+  async function startVoiceRecording() {
+    if (!browserSupportsVoiceRecording()) {
+      showToast(t("composer.voice.unsupported"));
+      return;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = getPreferredVoiceMimeType();
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    activeVoiceRecorder = recorder;
+    activeVoiceStream = stream;
+    activeVoiceChunks = [];
+    activeVoiceMimeType = recorder.mimeType || mimeType || "audio/webm";
+
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        activeVoiceChunks.push(event.data);
+      }
+    };
+    recorder.onstop = () => {
+      stopActiveVoiceStream();
+    };
+    recorder.start();
+    state.detail.voiceRecording = true;
+    state.detail.voiceTranscribing = false;
+    syncComposerActionState();
+    scheduleSessionDetailRender();
+  }
+
+  async function stopVoiceRecordingAndSubmit() {
+    const recorder = activeVoiceRecorder;
+    if (!recorder) {
+      state.detail.voiceRecording = false;
+      syncComposerActionState();
+      scheduleSessionDetailRender();
+      return;
+    }
+
+    const chunks = await new Promise((resolve, reject) => {
+      recorder.addEventListener(
+        "stop",
+        () => resolve([...activeVoiceChunks]),
+        { once: true },
+      );
+      recorder.addEventListener(
+        "error",
+        (event) => reject(event.error || new Error("Voice recording failed.")),
+        { once: true },
+      );
+      recorder.stop();
+    });
+
+    const mimeType = activeVoiceMimeType || recorder.mimeType || "audio/webm";
+    resetVoiceCaptureState();
+    state.detail.voiceRecording = false;
+    state.detail.voiceTranscribing = true;
+    syncComposerActionState();
+    scheduleSessionDetailRender();
+
+    try {
+      const blob = new Blob(chunks, { type: mimeType });
+      const codex = buildCodexLaunchPayload(
+        state.detail.codexLaunch,
+        state.detail.codexUiOptions,
+      );
+      const result = await sendVoiceMessage(session.sessionId, blob, {
+        mimeType,
+        filename: `voice-note${mimeType.includes("ogg") ? ".ogg" : mimeType.includes("wav") ? ".wav" : ".webm"}`,
+        modelId: codex?.model,
+        reasoningEffort: codex?.reasoningEffort,
+        profile: codex?.profile,
+      });
+      pushClientDebugLog("info", "Voice note transcription completed", result.transcriptionDiagnostics);
+      state.detail.voiceTranscribing = false;
+      syncComposerActionState();
+      scheduleSessionDetailRender();
+      const finalTranscript = composeMessageContentWithStartingPrompt(
+        result.transcript,
+        state.detail.startingPrompt,
+      );
+      if (state.detail.startingPrompt) {
+        state.detail.startingPrompt = "";
+        state.detail.composerRefreshRequested = true;
+        scheduleSessionDetailRender();
+      }
+      await submitPromptContent(
+        finalTranscript,
+        () => Promise.resolve(result),
+        { clearDraft: false, restoreDraftOnError: false, restoreDraftText: result.transcript },
+      );
+    } catch (error) {
+      state.detail.voiceTranscribing = false;
+      syncComposerActionState();
+      scheduleSessionDetailRender();
+      showToast(messageOf(error));
+    }
+  }
+
   async function refreshBusySessionBeforeSend() {
     if (!isSessionLiveBusy(state.detail.session)) {
       return false;
     }
 
+    pushClientDebugLog("debug", "Refreshing busy session before send", {
+      sessionId: state.detail.session?.sessionId || session.sessionId,
+      socketState: state.socketState,
+    });
     await resumeActiveSessionDetail("pre-send");
     return isSessionLiveBusy(state.detail.session);
   }
@@ -3590,6 +4732,9 @@ function renderSessionDetail() {
       }
 
       event.preventDefault();
+      if (state.detail.voiceRecording || state.detail.voiceTranscribing) {
+        return;
+      }
       if (await refreshBusySessionBeforeSend()) {
         return;
       }
@@ -3613,13 +4758,44 @@ function renderSessionDetail() {
         return;
       }
 
+      if (state.detail.voiceRecording || state.detail.voiceTranscribing) {
+        return;
+      }
+
       await sendComposerMessage();
+    };
+  }
+
+  if (composerVoiceFab) {
+    composerVoiceFab.onclick = async () => {
+      if (state.detail.voiceTranscribing) {
+        return;
+      }
+
+      try {
+        if (state.detail.voiceRecording) {
+          await stopVoiceRecordingAndSubmit();
+          return;
+        }
+
+        await startVoiceRecording();
+      } catch (error) {
+        resetVoiceCaptureState();
+        state.detail.voiceRecording = false;
+        state.detail.voiceTranscribing = false;
+        syncComposerActionState();
+        scheduleSessionDetailRender();
+        showToast(messageOf(error));
+      }
     };
   }
 
   if (messageFormEl) {
     messageFormEl.onsubmit = async (event) => {
       event.preventDefault();
+      if (state.detail.voiceRecording || state.detail.voiceTranscribing) {
+        return;
+      }
       if (await refreshBusySessionBeforeSend()) {
         return;
       }
@@ -3787,12 +4963,29 @@ function attachSessionSocket(sessionId) {
   }
 
   cleanupSocket();
+  pushClientDebugLog("debug", "Connecting session socket", {
+    sessionId: normalizedSessionId,
+    correlationId: getReplyCorrelationId(),
+  });
+  state.detail.replySocketAttempt = Number(state.detail.replySocketAttempt || 0) + 1;
   const socket = connectSessionSocket(normalizedSessionId, {
+    connectionId: buildReplySocketConnectionId(
+      getReplyCorrelationId(),
+      state.detail.replySocketAttempt,
+    ),
+    onLog(entry) {
+      pushClientDebugLog(entry.level, entry.message, entry.details);
+    },
     onStateChange(nextState) {
       if (state.ws !== socket || !isActiveDetailSession(normalizedSessionId)) {
         return;
       }
 
+      pushClientDebugLog("debug", "Session socket state changed", {
+        sessionId: normalizedSessionId,
+        correlationId: getReplyCorrelationId(),
+        state: nextState,
+      });
       state.socketState = nextState;
       if (state.detail.session) {
         scheduleSessionDetailRender();
@@ -3808,6 +5001,15 @@ function attachSessionSocket(sessionId) {
         return;
       }
 
+      pushClientDebugLog("debug", "Session socket event received", {
+        sessionId: normalizedSessionId,
+        correlationId: getReplyCorrelationId(),
+        eventType: event.type || "",
+        seq: Number(event.seq || 0),
+        turnId: event.turnId || "",
+        status: event.status || "",
+        ...summarizeReplyEvent(event),
+      });
       if (state.detail.session) {
         state.detail.session.updatedAt = new Date().toISOString();
         if (event.type === "turn.started") {
@@ -3861,6 +5063,7 @@ async function refreshCodexStatus(sessionId) {
     });
 
     if (state.detail.session && state.detail.session.sessionId === sessionId) {
+      state.runtime.codexStatusBySession[sessionId] = status;
       state.detail.codexStatus = status;
       scheduleSessionDetailRender();
     }
@@ -4486,6 +5689,37 @@ function renderRawEventList(events) {
   `;
 }
 
+function renderClientLogList(logs) {
+  const items = Array.isArray(logs) ? [...logs].slice(-80).reverse() : [];
+  if (items.length === 0) {
+    return `<div class="inspect-empty">No client logs yet.</div>`;
+  }
+
+  return `
+    <div class="inspect-raw-list">
+      ${items
+        .map((entry) => {
+          const details = formatClientLogDetails(entry.details);
+          return `
+            <div class="inspect-raw-item">
+              <div class="inspect-raw-head">
+                <span class="inspect-raw-kind">${escapeHtml(String(entry.level || "info"))}</span>
+                <span class="inspect-raw-ts">${escapeHtml(entry.ts ? formatTs(Math.floor(entry.ts / 1000)) : "—")}</span>
+              </div>
+              <p class="inspect-raw-summary">${escapeHtml(entry.message || "—")}</p>
+              ${
+                details
+                  ? `<pre class="inspect-raw-summary">${escapeHtml(shortenText(details, 1200))}</pre>`
+                  : ""
+              }
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function formatRuntimeValue(value, fallback = t("generic.notSynced")) {
   const text = typeof value === "string" ? value.trim() : "";
   return text || fallback;
@@ -4677,6 +5911,10 @@ function renderInspectSessionSection(session) {
           ${escapeHtml(t("inspect.autoScroll", { value: t(state.detail.autoScroll ? "generic.on" : "generic.off") }))}
         </button>
       </div>
+      <details class="inspect-raw-details">
+        <summary class="inspect-raw-summary-toggle">${escapeHtml("Client logs")}</summary>
+        ${renderClientLogList(state.detail.clientLogs)}
+      </details>
       <details class="inspect-raw-details">
         <summary class="inspect-raw-summary-toggle">${escapeHtml(t("inspect.rawEventsDebug"))}</summary>
         ${renderRawEventList(state.detail.rawEvents)}
@@ -6916,22 +8154,7 @@ function matchesSessionFilters(session, project, filters) {
     return false;
   }
 
-  const keyword = filters.keyword.trim().toLowerCase();
-  if (!keyword) {
-    return true;
-  }
-
-  const haystacks = [
-    session.title,
-    session.projectId,
-    project?.name,
-    session.status,
-    session.lastAssistantContent,
-    session.lastCommand,
-    session.codexThreadId,
-  ];
-
-  return haystacks.some((value) => String(value || "").toLowerCase().includes(keyword));
+  return sessionMatchesSearch(session, project, filters.keyword);
 }
 
 function countActiveSessionFilters(filters) {
@@ -7853,6 +9076,11 @@ async function maybeLoadOlderSessionEvents(sessionId, list) {
     });
   } catch (error) {
     state.detail.historyLoading = false;
+    pushClientDebugLog("warn", "Failed to load older session events", {
+      sessionId,
+      beforeCursor: state.detail.beforeCursor,
+      error: messageOf(error),
+    });
     showToast(messageOf(error));
   }
 }
@@ -7947,18 +9175,28 @@ async function resumeActiveSessionDetail(reason = "resume") {
   }
 
   const now = Date.now();
-  if (now - Number(state.detail.lastResumeSyncAt || 0) < 900) {
+  if (!shouldRefreshVisibleDetail(now, state.detail.lastResumeSyncAt, 900)) {
     return;
   }
 
   state.detail.resumeSyncInFlight = true;
   state.detail.lastResumeSyncAt = now;
+  pushClientDebugLog("debug", "Resuming active session detail", {
+    sessionId,
+    reason,
+    socketState: state.socketState,
+  });
 
   try {
     const shouldForceReconnect =
       reason === "visibility" || reason === "focus" || reason === "pageshow";
 
     if (shouldForceReconnect || state.socketState === "closed" || state.socketState === "error") {
+      pushClientDebugLog("debug", "Reconnecting session socket during resume", {
+        sessionId,
+        reason,
+        previousSocketState: state.socketState,
+      });
       cleanupSocket();
       state.socketState = "connecting";
       attachSessionSocket(sessionId);
@@ -7968,19 +9206,31 @@ async function resumeActiveSessionDetail(reason = "resume") {
       await syncImportedSession(sessionId).catch(() => null);
     }
 
-    const refreshedSession = await getSession(sessionId).catch(() => null);
+    const [refreshedSession] = await Promise.all([
+      getSession(sessionId).catch(() => null),
+      catchUpSessionEvents(sessionId, state.detail.cursor || 0).catch(() => null),
+    ]);
     if (refreshedSession && state.detail.session?.sessionId === sessionId) {
       state.detail.session = refreshedSession;
       syncDetailPendingApproval(refreshedSession, state.detail.timelineState);
       updateSessionListItem(refreshedSession);
     }
 
-    await catchUpSessionEvents(sessionId, state.detail.cursor || 0).catch(() => null);
-
     if (state.detail.session?.sessionId === sessionId) {
       scheduleSessionDetailRender();
       scheduleImportedSessionSync(sessionId, 1000);
     }
+    pushClientDebugLog("debug", "Resume sync finished", {
+      sessionId,
+      reason,
+    });
+  } catch (error) {
+    pushClientDebugLog("error", "Resume sync failed", {
+      sessionId,
+      reason,
+      error: messageOf(error),
+    });
+    throw error;
   } finally {
     state.detail.resumeSyncInFlight = false;
   }
@@ -8002,6 +9252,10 @@ function scheduleLiveResumeSync(sessionId, delayMs = 3200) {
     return;
   }
 
+  pushClientDebugLog("debug", "Scheduling live resume sync", {
+    sessionId,
+    delayMs,
+  });
   state.detail.liveResumeTimerId = window.setTimeout(async () => {
     state.detail.liveResumeTimerId = 0;
 
@@ -8011,6 +9265,11 @@ function scheduleLiveResumeSync(sessionId, delayMs = 3200) {
 
     try {
       await resumeActiveSessionDetail("live-heartbeat");
+    } catch (error) {
+      pushClientDebugLog("warn", "Live resume sync failed", {
+        sessionId,
+        error: messageOf(error),
+      });
     } finally {
       if (
         state.detail.session &&
@@ -8053,6 +9312,10 @@ function scheduleImportedSessionSync(sessionId, delayMs = 1200) {
     return;
   }
 
+  pushClientDebugLog("debug", "Scheduling imported session sync", {
+    sessionId,
+    delayMs,
+  });
   state.detail.importedSyncTimerId = window.setTimeout(async () => {
     state.detail.importedSyncTimerId = 0;
 
@@ -8081,7 +9344,11 @@ function scheduleImportedSessionSync(sessionId, delayMs = 1200) {
 
       scheduleSessionDetailRender();
       scheduleImportedSessionSync(sessionId, 1600);
-    } catch {
+    } catch (error) {
+      pushClientDebugLog("warn", "Imported session sync failed", {
+        sessionId,
+        error: messageOf(error),
+      });
       scheduleImportedSessionSync(sessionId, 2400);
     }
   }, delayMs);

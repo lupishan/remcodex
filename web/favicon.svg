@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="RemCodex favicon">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#ea5b2a"/>
+      <stop offset="100%" stop-color="#ffb06d"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#bg)"/>
+  <path d="M19 18h16c7.7 0 13 4.85 13 12.15 0 4.74-2.3 8.52-6.35 10.56L47 46H37.55l-4.58-4.75H28v4.75H19V18zm9 7.5v8.55h6.2c3.05 0 4.8-1.55 4.8-4.28 0-2.8-1.75-4.27-4.8-4.27H28z" fill="#fff7ee"/>
+</svg>

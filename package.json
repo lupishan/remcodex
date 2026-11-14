@@ -1,16 +1,19 @@
 {
   "name": "remcodex",
-  "version": "0.1.0-beta.12",
+  "version": "0.1.0-beta.13",
   "description": "Control Codex from anywhere. Even on your phone.",
   "license": "MIT",
   "bin": {
-    "remcodex": "dist/server/src/cli.js"
+    "remcodex": "dist/server/src/cli.js",
+    "remcodex-tui": "bin/remcodex-tui"
   },
   "files": [
     "dist",
+    "bin",
     "web",
     "scripts/check-node-version.js",
     "scripts/fix-node-pty-helper.js",
+    "scripts/remcodex-tui.py",
     "README.md"
   ],
   "scripts": {
@@ -21,16 +24,21 @@
     "cli": "tsx server/src/cli.ts --no-open",
     "preinstall": "node scripts/check-node-version.js",
     "smoke:tarball": "node scripts/smoke-test-tarball.js",
-    "smoke:start": "node scripts/smoke-start-tarball.js"
+    "smoke:start": "node scripts/smoke-start-tarball.js",
+    "smoke:mcp-auth": "node scripts/smoke-mcp-auth.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0-beta.3",
+    "@modelcontextprotocol/server": "^2.0.0-beta.3",
     "better-sqlite3": "^11.8.1",
     "express": "^4.21.2",
     "markdown-it": "^14.1.1",
     "node-pty": "^1.0.0",
-    "ws": "^8.18.1"
+    "ws": "^8.18.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0-beta.3",
     "@types/express": "^5.0.1",
     "@types/node": "^22.13.10",
     "@types/ws": "^8.5.14",

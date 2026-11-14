@@ -1,0 +1,162 @@
+:root {
+  color-scheme: light;
+  --directory-ink: #1d1d1b;
+  --directory-soft: #5b5447;
+  --directory-accent: #bc5a30;
+  --directory-mint: #2d7963;
+  --directory-line: rgba(76, 61, 37, 0.12);
+  font-family: "Avenir Next", "PingFang SC", "Noto Sans SC", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at top left, rgba(255, 182, 138, 0.36), transparent 30%),
+    radial-gradient(circle at top right, rgba(151, 206, 179, 0.32), transparent 24%),
+    linear-gradient(180deg, #f6f1e7 0%, #f7f3ea 52%, #f3eee3 100%);
+  color: var(--directory-ink);
+}
+
+.directory-glow {
+  position: fixed;
+  width: 18rem;
+  height: 18rem;
+  border-radius: 999px;
+  filter: blur(70px);
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+.directory-glow-left {
+  top: 3rem;
+  left: -4rem;
+  background: rgba(246, 152, 98, 0.45);
+}
+
+.directory-glow-right {
+  top: 18rem;
+  right: -6rem;
+  background: rgba(97, 177, 154, 0.32);
+}
+
+.directory-shell {
+  position: relative;
+  z-index: 1;
+  width: min(100% - 2rem, 920px);
+  margin: 0 auto;
+  padding: 5rem 0 4rem;
+}
+
+.directory-hero {
+  margin-bottom: 2rem;
+}
+
+.directory-eyebrow {
+  margin: 0 0 0.7rem;
+  color: var(--directory-accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  max-width: 38rem;
+  margin-bottom: 0.8rem;
+  font-size: clamp(2.5rem, 7vw, 5.3rem);
+  line-height: 0.98;
+  letter-spacing: -0.06em;
+}
+
+.directory-intro {
+  margin-bottom: 0;
+  color: var(--directory-soft);
+  font-size: 1.08rem;
+}
+
+.directory-list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.directory-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  padding: 1.25rem;
+  border: 1px solid var(--directory-line);
+  border-radius: 22px;
+  background: rgba(255, 251, 244, 0.82);
+  color: inherit;
+  text-decoration: none;
+  box-shadow: 0 18px 48px rgba(113, 74, 21, 0.08);
+  transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.directory-card:hover,
+.directory-card:focus-visible {
+  border-color: rgba(188, 90, 48, 0.4);
+  outline: none;
+  transform: translateY(-2px);
+  box-shadow: 0 22px 54px rgba(113, 74, 21, 0.14);
+}
+
+.directory-card-mark {
+  display: grid;
+  width: 2.5rem;
+  height: 2.5rem;
+  place-items: center;
+  border-radius: 14px;
+  background: rgba(45, 121, 99, 0.12);
+  color: var(--directory-mint);
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.directory-card h2 {
+  margin-bottom: 0.3rem;
+  font-size: 1.15rem;
+}
+
+.directory-card p {
+  margin-bottom: 0.45rem;
+  color: var(--directory-soft);
+  line-height: 1.5;
+}
+
+.directory-card span {
+  color: var(--directory-accent);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.directory-message {
+  padding: 1.3rem;
+  border: 1px dashed var(--directory-line);
+  border-radius: 18px;
+  color: var(--directory-soft);
+  text-align: center;
+}
+
+.directory-message-error {
+  color: #9f3d28;
+}
+
+@media (max-width: 600px) {
+  .directory-shell {
+    padding-top: 3rem;
+  }
+}

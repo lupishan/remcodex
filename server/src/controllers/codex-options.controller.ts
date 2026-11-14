@@ -10,6 +10,7 @@ import { resolveCodexUiOptions } from "../utils/codex-ui-options";
 import { resolveCodexQuotaSnapshot } from "../utils/codex-quota";
 import { resolveCodexStatus } from "../utils/codex-status";
 import type { CodexQuotaPayload } from "../types/models";
+import { resolveAgentEnvironment, type AgentEnvironmentRegistry } from "../utils/agent-environment-registry";
 
 interface CodexOptionsRouterDeps {
   sessionManager: SessionManager;
@@ -17,6 +18,7 @@ interface CodexOptionsRouterDeps {
   eventStore: EventStore;
   codexMode: CodexExecutionMode;
   codexRolloutSync: CodexRolloutSyncService;
+  agentEnvironmentRegistry: AgentEnvironmentRegistry;
 }
 
 interface CodexQuotaResponse {
@@ -194,10 +196,14 @@ export function createCodexOptionsRouter(deps: CodexOptionsRouterDeps): Router {
 
     let threadId = params.threadId?.trim() || "";
     let cwd = params.cwd?.trim() || "";
+    let codexHome: string | null = null;
 
     if (params.sessionId?.trim()) {
       const session = deps.sessionManager.getSession(params.sessionId.trim());
       if (session) {
+        codexHome = session.agent_environment
+          ? resolveAgentEnvironment(deps.agentEnvironmentRegistry, session.agent_environment)?.codexHome ?? null
+          : null;
         threadId = threadId || session.codex_thread_id || "";
         if (threadId) {
           if (!cwd) {
@@ -221,6 +227,7 @@ export function createCodexOptionsRouter(deps: CodexOptionsRouterDeps): Router {
       executionMode:
         deps.codexMode === "app-server" ? "codex app-server" : "codex exec --json",
       interactiveApprovalUi: deps.codexMode === "app-server",
+      codexHome,
     });
 
     response.json({
@@ -251,6 +258,9 @@ export function createCodexOptionsRouter(deps: CodexOptionsRouterDeps): Router {
       const restored = resolveCodexQuotaSnapshot({
         threadId: session.codex_thread_id,
         cwd: project?.path || null,
+        codexHome: session.agent_environment
+          ? resolveAgentEnvironment(deps.agentEnvironmentRegistry, session.agent_environment)?.codexHome
+          : null,
       });
 
       if (restored) {
@@ -275,10 +285,21 @@ export function createCodexOptionsRouter(deps: CodexOptionsRouterDeps): Router {
     response.json(resolveCodexHosts(request));
   });
 
-  router.get("/importable-sessions", (_request, response) => {
-    response.json({
-      items: deps.codexRolloutSync.listImportableSessions(),
-    });
+  router.get("/importable-sessions", (request, response, next) => {
+    try {
+      const requestedEnvironment = typeof request.query.agentEnvironment === "string"
+        ? request.query.agentEnvironment.trim()
+        : "";
+      const environmentName = requestedEnvironment || deps.agentEnvironmentRegistry.defaultEnvironment;
+      const codexHome = environmentName
+        ? resolveAgentEnvironment(deps.agentEnvironmentRegistry, environmentName)?.codexHome
+        : null;
+      response.json({
+        items: deps.codexRolloutSync.listImportableSessions(20, codexHome),
+      });
+    } catch (error) {
+      next(error);
+    }
   });
 
   return router;

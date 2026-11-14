@@ -1,0 +1,9 @@
+# Example Codex MCP configuration for RemCodex.
+# Copy this into ~/.codex/config.toml and adjust the token path if needed.
+
+[mcp_servers.remcodex]
+url = "http://127.0.0.1:18840/mcp"
+default_tools_approval_mode = "approve"
+
+[mcp_servers.remcodex.http_headers]
+Authorization = "Bearer $(cat /path/to/remcodex-token)"

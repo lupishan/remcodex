@@ -9,6 +9,7 @@ import type { CodexQuotaPayload } from "../types/models";
 interface ResolveCodexQuotaInput {
   threadId?: string | null;
   cwd?: string | null;
+  codexHome?: string | null;
 }
 
 interface CodexThreadLookupRow {
@@ -18,7 +19,10 @@ interface CodexThreadLookupRow {
   updated_at: number;
 }
 
-function resolveCodexHomeDir(): string {
+function resolveCodexHomeDir(codexHome?: string | null): string {
+  if (codexHome?.trim()) {
+    return path.resolve(codexHome);
+  }
   const override = process.env.CODEX_HOME?.trim();
   if (override) {
     return path.resolve(override);
@@ -27,13 +31,13 @@ function resolveCodexHomeDir(): string {
   return path.join(os.homedir(), ".codex");
 }
 
-function resolveStateDbPath(): string {
+function resolveStateDbPath(codexHome?: string | null): string {
   const override = process.env.CODEX_STATE_DB_PATH?.trim();
   if (override) {
     return path.resolve(override);
   }
 
-  return path.join(resolveCodexHomeDir(), "state_5.sqlite");
+  return path.join(resolveCodexHomeDir(codexHome), "state_5.sqlite");
 }
 
 function readNumberField(input: unknown): number | undefined {
@@ -127,7 +131,7 @@ function parseQuotaLine(line: string): CodexQuotaPayload | null {
 }
 
 function findRolloutPathInStateDb(input: ResolveCodexQuotaInput): string | null {
-  const dbPath = resolveStateDbPath();
+  const dbPath = resolveStateDbPath(input.codexHome);
   if (!existsSync(dbPath)) {
     return null;
   }
@@ -154,7 +158,7 @@ function findRolloutPathInStateDb(input: ResolveCodexQuotaInput): string | null 
 
     const resolved = path.isAbsolute(row.rollout_path)
       ? row.rollout_path
-      : path.resolve(resolveCodexHomeDir(), row.rollout_path);
+      : path.resolve(resolveCodexHomeDir(input.codexHome), row.rollout_path);
 
     return existsSync(resolved) ? resolved : null;
   } finally {
@@ -205,8 +209,8 @@ function scanDirForRollout(rootDir: string, threadId: string): string | null {
   return null;
 }
 
-function findRolloutPathInSessions(threadId: string): string | null {
-  const sessionsDir = path.join(resolveCodexHomeDir(), "sessions");
+function findRolloutPathInSessions(threadId: string, codexHome?: string | null): string | null {
+  const sessionsDir = path.join(resolveCodexHomeDir(codexHome), "sessions");
   if (!existsSync(sessionsDir)) {
     return null;
   }
@@ -236,7 +240,7 @@ export function resolveCodexQuotaSnapshot(
 ): CodexQuotaPayload | null {
   const rolloutPath =
     findRolloutPathInStateDb(input) ||
-    (input.threadId?.trim() ? findRolloutPathInSessions(input.threadId.trim()) : null);
+    (input.threadId?.trim() ? findRolloutPathInSessions(input.threadId.trim(), input.codexHome) : null);
 
   if (!rolloutPath) {
     return null;

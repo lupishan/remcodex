@@ -183,6 +183,16 @@ export interface ProjectRecord {
   created_at: string;
 }
 
+export interface AgentProfileRecord {
+  id: string;
+  name: string;
+  starting_prompt: string;
+  default_directory: string;
+  agent_environment: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface SessionRecord {
   id: string;
   title: string | null;
@@ -190,6 +200,12 @@ export interface SessionRecord {
   status: SessionStatus;
   pid: number | null;
   codex_thread_id: string | null;
+  parent_session_id: string | null;
+  agent_environment: string | null;
+  starting_prompt: string;
+  description: string | null;
+  tags: string[];
+  metadata: Record<string, unknown>;
   source_kind: SessionSourceKind;
   source_rollout_path: string | null;
   source_thread_id: string | null;
@@ -197,6 +213,9 @@ export interface SessionRecord {
   source_last_synced_at: string | null;
   /** 1/0 from DB: external Codex rollout still has an unclosed turn (not local runner state). */
   source_rollout_has_open_turn: number;
+  app_server_id: string | null;
+  app_server_endpoint: string | null;
+  app_server_pid: number | null;
   created_at: string;
   updated_at: string;
 }

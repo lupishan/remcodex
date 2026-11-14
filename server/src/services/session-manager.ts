@@ -21,6 +21,14 @@ import type {
 import { AppError } from "../utils/errors";
 import { createId } from "../utils/ids";
 import { appendCappedText } from "../utils/output-limits";
+import {
+  resolveAgentEnvironment,
+  type AgentEnvironmentRegistry,
+} from "../utils/agent-environment-registry";
+import {
+  composeMessageContentWithStartingPrompt,
+  normalizeSessionStartingPrompt,
+} from "../utils/session-starting-prompt";
 import type { CodexJsonEvent } from "./codex-exec-runner";
 import { createCodexRunner, type CodexExecutionMode, type CodexRunner } from "./codex-runner";
 import {
@@ -33,6 +41,8 @@ import {
 } from "./codex-stream-events";
 import { EventStore } from "./event-store";
 import { ProjectManager } from "./project-manager";
+import type { PeerCommunicationService } from "./peer-communication";
+import type { PeerDigestScheduler } from "./peer-digests";
 
 interface MessageRuntimeState {
   messageId: string;
@@ -70,6 +80,10 @@ interface PatchRuntimeState {
 
 interface RunnerState {
   runner: CodexRunner;
+  cwd: string;
+  command: string;
+  stderr: string;
+  stderrTruncated: boolean;
   stopRequested: boolean;
   transientSeqCursor: number;
   turnId: string;
@@ -102,7 +116,18 @@ interface SessionManagerOptions {
   projectManager: ProjectManager;
   codexCommand: string;
   codexMode: CodexExecutionMode;
+  agentEnvironmentRegistry?: AgentEnvironmentRegistry;
+  peerCommunication?: PeerCommunicationService;
+  peerDigestScheduler?: PeerDigestScheduler;
 }
+
+const EMPTY_AGENT_ENVIRONMENT_REGISTRY: AgentEnvironmentRegistry = {
+  version: 1,
+  defaultEnvironment: null,
+  managedPaths: [],
+  allowedRoots: [],
+  environments: {},
+};
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -180,6 +205,31 @@ function normalizeDemoPrompt(projectPath: string, message: string): string {
   return `${message.trim()}\n\nUse this exact target path: ${targetPath}`;
 }
 
+function normalizeSessionTags(tags: string[] | undefined): string[] {
+  return [...new Set((tags ?? []).map((tag) => String(tag).trim()).filter(Boolean))];
+}
+
+function parseSessionJson<T>(value: unknown, fallback: T): T {
+  if (typeof value !== "string" || !value.trim()) {
+    return fallback;
+  }
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function hydrateSession<T extends object>(row: T): T {
+  const raw = row as T & { tags_json?: unknown; metadata_json?: unknown };
+  const { tags_json: tagsJson, metadata_json: metadataJson, ...session } = raw;
+  return {
+    ...session,
+    tags: parseSessionJson<string[]>(tagsJson, []),
+    metadata: parseSessionJson<Record<string, unknown>>(metadataJson, {}),
+  } as T;
+}
+
 export class SessionManager {
   private readonly runners = new Map<string, RunnerState>();
   private readonly pendingApprovals = new Map<string, Map<string, PendingApproval>>();
@@ -188,7 +238,7 @@ export class SessionManager {
   constructor(private readonly options: SessionManagerOptions) {}
 
   listSessions(): SessionListRecord[] {
-    return this.options.db
+    const rows = this.options.db
       .prepare(
         `
           SELECT
@@ -198,12 +248,21 @@ export class SessionManager {
             s.status,
             s.pid,
             s.codex_thread_id,
+            s.parent_session_id,
+            s.agent_environment,
+            s.starting_prompt,
+            s.description,
+            s.tags_json,
+            s.metadata_json,
             s.source_kind,
             s.source_rollout_path,
             s.source_thread_id,
             s.source_sync_cursor,
             s.source_last_synced_at,
             s.source_rollout_has_open_turn,
+            s.app_server_id,
+            s.app_server_endpoint,
+            s.app_server_pid,
             s.created_at,
             s.updated_at,
             (
@@ -238,7 +297,51 @@ export class SessionManager {
           ORDER BY COALESCE(last_event_at, s.updated_at) DESC
         `,
       )
-      .all() as SessionListRecord[];
+      .all() as Array<Record<string, unknown>>;
+    return rows
+      .map((session) => hydrateSession(session) as unknown as SessionListRecord);
+  }
+
+  getDefaultAgentEnvironment(): string | null {
+    return this.options.agentEnvironmentRegistry?.defaultEnvironment ?? null;
+  }
+
+  findSessionByProjectPath(projectPath: string, agentEnvironment?: string | null): SessionRecord | null {
+    const trimmedPath = projectPath.trim();
+    if (!trimmedPath) {
+      return null;
+    }
+
+    const project = this.options.projectManager.getProjectByPath(trimmedPath);
+    if (!project) {
+      return null;
+    }
+
+    const row = (
+      this.options.db
+        .prepare(
+          `
+            SELECT *
+            FROM sessions
+            WHERE project_id = ?
+              AND status NOT IN ('completed', 'failed')
+              AND (? IS NULL OR COALESCE(agent_environment, '') = ?)
+            ORDER BY updated_at DESC
+            LIMIT 1
+          `,
+        )
+        .get(project.id, agentEnvironment === undefined ? null : agentEnvironment ?? "", agentEnvironment ?? "") as Record<string, unknown> | undefined
+    );
+    return row ? (hydrateSession(row) as unknown as SessionRecord) : null;
+  }
+
+  listSessionsByProjectPath(projectPath: string): SessionListRecord[] {
+    const project = this.options.projectManager.getProjectByPath(projectPath);
+    if (!project) {
+      return [];
+    }
+
+    return this.listSessions().filter((session) => session.project_id === project.id);
   }
 
   isLiveBusy(sessionId: string): boolean {
@@ -256,8 +359,8 @@ export class SessionManager {
   }
 
   getSession(sessionId: string): SessionRecord | null {
-    return (
-      (this.options.db
+    const row = (
+      this.options.db
         .prepare(
           `
             SELECT
@@ -267,20 +370,30 @@ export class SessionManager {
               status,
               pid,
               codex_thread_id,
+              parent_session_id,
+              agent_environment,
+              starting_prompt,
+              description,
+              tags_json,
+              metadata_json,
               source_kind,
               source_rollout_path,
               source_thread_id,
               source_sync_cursor,
               source_last_synced_at,
               source_rollout_has_open_turn,
+              app_server_id,
+              app_server_endpoint,
+              app_server_pid,
               created_at,
               updated_at
             FROM sessions
             WHERE id = ?
           `,
         )
-        .get(sessionId) as SessionRecord | undefined) ?? null
+        .get(sessionId) as Record<string, unknown> | undefined
     );
+    return row ? (hydrateSession(row) as unknown as SessionRecord) : null;
   }
 
   getPendingApproval(sessionId: string): SessionApprovalPayload | null {
@@ -314,10 +427,108 @@ export class SessionManager {
     };
   }
 
-  createSession(input: { projectId: string; title?: string }): SessionRecord {
+  resumeSession(sessionId: string, parentSessionId?: string | null): SessionRecord {
+    const session = this.getSessionOrThrow(sessionId);
+    const requestedParentId = String(parentSessionId || "").trim();
+    if (requestedParentId) {
+      if (requestedParentId === session.id) {
+        throw new AppError(400, "A session cannot be its own parent.");
+      }
+
+      const visited = new Set([session.id]);
+      let ancestorId: string | null = requestedParentId;
+      while (ancestorId) {
+        if (visited.has(ancestorId)) throw new AppError(400, "Parent relationship would create a cycle.");
+        visited.add(ancestorId);
+        ancestorId = this.getSession(ancestorId)?.parent_session_id ?? null;
+      }
+      const parent = this.getSession(requestedParentId);
+      if (!parent) {
+        throw new AppError(404, "Parent session not found.");
+      }
+      if (!this.options.projectManager.isProjectPathAncestor(parent.project_id, session.project_id)) {
+        throw new AppError(400, "Parent session directory must be an ancestor of the resumed session directory.");
+      }
+    }
+
+    const nextStatus = ["completed", "failed"].includes(session.status) ? "idle" : session.status;
+    this.options.db
+      .prepare(
+        `
+          UPDATE sessions
+          SET parent_session_id = ?, status = ?, updated_at = ?
+          WHERE id = ?
+        `,
+      )
+      .run(requestedParentId || session.parent_session_id, nextStatus, nowIso(), session.id);
+
+    return this.getSessionOrThrow(session.id);
+  }
+
+  updateSessionMetadata(input: {
+    sessionId: string;
+    description?: string | null;
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+  }): SessionRecord {
+    const session = this.getSessionOrThrow(input.sessionId);
+    const description =
+      input.description === undefined ? session.description : input.description?.trim() || null;
+    const tags = input.tags === undefined ? session.tags : normalizeSessionTags(input.tags);
+    const metadata = input.metadata === undefined ? session.metadata : input.metadata;
+
+    this.options.db
+      .prepare(
+        `
+          UPDATE sessions
+          SET description = ?, tags_json = ?, metadata_json = ?, updated_at = ?
+          WHERE id = ?
+        `,
+      )
+      .run(description, JSON.stringify(tags), JSON.stringify(metadata), nowIso(), session.id);
+
+    return this.getSessionOrThrow(session.id);
+  }
+
+  createSession(input: {
+    projectId: string;
+    title?: string;
+    startingPrompt?: string;
+    description?: string | null;
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+    parentSessionId?: string | null;
+    agentEnvironment?: string | null;
+  }): SessionRecord {
     const project = this.options.projectManager.getProject(input.projectId);
     if (!project) {
       throw new AppError(404, "Project not found.");
+    }
+    const parentSessionId = String(input.parentSessionId || "").trim();
+    const parentSession = parentSessionId ? this.getSession(parentSessionId) : null;
+    if (parentSessionId && !parentSession) {
+      throw new AppError(404, "Parent session not found.");
+    }
+    if (
+      parentSession &&
+      !this.options.projectManager.isProjectPathAncestor(parentSession.project_id, project.id)
+    ) {
+      throw new AppError(400, "Parent session directory must be an ancestor of the child session directory.");
+    }
+
+    const requestedAgentEnvironment =
+      input.agentEnvironment?.trim() ||
+      parentSession?.agent_environment ||
+      this.options.agentEnvironmentRegistry?.defaultEnvironment ||
+      null;
+    let agentEnvironment: string | null = null;
+    try {
+      agentEnvironment = resolveAgentEnvironment(
+        this.options.agentEnvironmentRegistry ?? EMPTY_AGENT_ENVIRONMENT_REGISTRY,
+        requestedAgentEnvironment,
+      )?.name ?? null;
+    } catch (error) {
+      throw new AppError(400, error instanceof Error ? error.message : String(error));
     }
 
     const timestamp = nowIso();
@@ -328,12 +539,21 @@ export class SessionManager {
       status: "idle",
       pid: null,
       codex_thread_id: null,
+      parent_session_id: parentSession?.id ?? null,
+      agent_environment: agentEnvironment,
+      starting_prompt: normalizeSessionStartingPrompt(input.startingPrompt),
+      description: input.description?.trim() || null,
+      tags: normalizeSessionTags(input.tags),
+      metadata: input.metadata ?? {},
       source_kind: "native",
       source_rollout_path: null,
       source_thread_id: null,
       source_sync_cursor: null,
       source_last_synced_at: null,
       source_rollout_has_open_turn: 0,
+      app_server_id: null,
+      app_server_endpoint: null,
+      app_server_pid: null,
       created_at: timestamp,
       updated_at: timestamp,
     };
@@ -348,16 +568,25 @@ export class SessionManager {
             status,
             pid,
             codex_thread_id,
+            parent_session_id,
+            agent_environment,
+            starting_prompt,
+            description,
+            tags_json,
+            metadata_json,
             source_kind,
             source_rollout_path,
             source_thread_id,
             source_sync_cursor,
             source_last_synced_at,
             source_rollout_has_open_turn,
+            app_server_id,
+            app_server_endpoint,
+            app_server_pid,
             created_at,
             updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
       )
       .run(
@@ -367,12 +596,21 @@ export class SessionManager {
         session.status,
         session.pid,
         session.codex_thread_id,
+        session.parent_session_id,
+        session.agent_environment,
+        session.starting_prompt,
+        session.description,
+        JSON.stringify(session.tags),
+        JSON.stringify(session.metadata),
         session.source_kind,
         session.source_rollout_path,
         session.source_thread_id,
         session.source_sync_cursor,
         session.source_last_synced_at,
         session.source_rollout_has_open_turn,
+        session.app_server_id,
+        session.app_server_endpoint,
+        session.app_server_pid,
         session.created_at,
         session.updated_at,
       );
@@ -395,7 +633,11 @@ export class SessionManager {
     if (!project) {
       throw new AppError(404, "Project not found for session.");
     }
-    const runtimePrompt = normalizeDemoPrompt(project.path, message);
+    if (session.app_server_endpoint && process.env.REMCODEX_ENABLE_TUI_CONTROL !== "1") {
+      throw new AppError(409, "Interactive TUI control is experimental. Set REMCODEX_ENABLE_TUI_CONTROL=1 to enable it.");
+    }
+    const userMessage = composeMessageContentWithStartingPrompt(message, session.starting_prompt);
+    const runtimePrompt = normalizeDemoPrompt(project.path, userMessage);
 
     const currentRunner = this.runners.get(sessionId);
     const busyStatuses: SessionStatus[] = ["starting", "running", "stopping"];
@@ -412,7 +654,7 @@ export class SessionManager {
             WHERE id = ?
           `,
         )
-        .run(deriveSessionTitleFromMessage(message), nowIso(), sessionId);
+        .run(deriveSessionTitleFromMessage(userMessage), nowIso(), sessionId);
     }
 
     const turnId = createId("turn");
@@ -425,9 +667,21 @@ export class SessionManager {
       phase: null,
       stream: null,
       payload: {
-        text: message,
+        text: userMessage,
       },
     });
+
+    if (session.starting_prompt.trim()) {
+      this.options.db
+        .prepare(
+          `
+            UPDATE sessions
+            SET starting_prompt = '', updated_at = ?
+            WHERE id = ?
+          `,
+        )
+        .run(nowIso(), sessionId);
+    }
 
     this.startRunner(
       sessionId,
@@ -552,10 +806,28 @@ export class SessionManager {
       return existing;
     }
 
-    const runner = createCodexRunner(this.options.codexMode, this.options.codexCommand, cwd);
+    const session = this.getSessionOrThrow(sessionId);
+    const runner = createCodexRunner(
+      this.options.codexMode,
+      this.options.codexCommand,
+      cwd,
+      session.app_server_endpoint,
+      session.agent_environment
+        ? resolveAgentEnvironment(this.options.agentEnvironmentRegistry ?? EMPTY_AGENT_ENVIRONMENT_REGISTRY, session.agent_environment)?.codexHome
+        : null,
+      this.options.peerCommunication?.issueCredential({
+        workerId: `session:${session.id}`,
+        sessionId: session.id,
+        scopes: ["worker.peer.mailbox", "worker.peer.summary", "worker.peer.timeline", "worker.peer.digest"],
+      }).token,
+    );
     const effectiveLaunch = this.withSessionWritableRoots(sessionId, codexLaunch);
     const runtime: RunnerState = {
       runner,
+      cwd,
+      command: this.options.codexCommand,
+      stderr: "",
+      stderrTruncated: false,
       stopRequested: false,
       transientSeqCursor: this.options.eventStore.latestSeq(sessionId),
       turnId,
@@ -590,8 +862,13 @@ export class SessionManager {
       }
     });
 
-    runner.onText((_stream, _text) => {
-      // raw stdout/stderr no longer belongs to the primary event protocol
+    runner.onText((stream, text) => {
+      if (stream === "stderr") {
+        const separator = runtime.stderr && !runtime.stderr.endsWith("\n") ? "\n" : "";
+        const capped = appendCappedText(runtime.stderr, `${separator}${text}`);
+        runtime.stderr = capped.nextText;
+        runtime.stderrTruncated ||= capped.truncated;
+      }
     });
 
     runner.onExit((exitCode) => {
@@ -845,12 +1122,16 @@ export class SessionManager {
         this.ensureTurnStarted(sessionId, runtime, event.turnId || runtime.turnId);
         const phase = event.phase || "final_answer";
         const messageId = this.resolveAssistantMessageId(runtime, phase, event.messageId);
+        const textDelta =
+          this.readRawText(event.payload.textDelta) ||
+          this.readRawText(event.payload.text) ||
+          "";
         this.appendAssistantDelta(
           sessionId,
           runtime,
           phase,
           messageId,
-          this.readRawText(event.payload.textDelta) || "",
+          textDelta,
         );
         return;
       }
@@ -880,11 +1161,16 @@ export class SessionManager {
       case "reasoning.delta": {
         this.ensureTurnStarted(sessionId, runtime, event.turnId || runtime.turnId);
         const messageId = this.resolveReasoningMessageId(runtime, event.messageId);
+        const textDelta =
+          this.readRawText(event.payload.textDelta) ||
+          this.readRawText(event.payload.text) ||
+          this.readString(event.payload.summary) ||
+          "";
         this.appendReasoningDelta(
           sessionId,
           runtime,
           messageId,
-          this.readRawText(event.payload.textDelta) || "",
+          textDelta,
           this.readString(event.payload.summary) || null,
         );
         return;
@@ -989,7 +1275,12 @@ export class SessionManager {
           runtime.turnId,
           `Process exited with code ${exitCode ?? -1}.`,
           {
+            command: runtime.command,
+            cwd: runtime.cwd,
             exitCode,
+            stderr: runtime.stderr || null,
+            stderrTruncated: runtime.stderrTruncated,
+            executionMode: this.options.codexMode,
           },
         );
         this.completeTurn(sessionId, runtime, "turn.aborted", {
@@ -1007,6 +1298,12 @@ export class SessionManager {
 
     if (exitCode === 0) {
       this.advanceImportedRolloutCursorToCurrentEnd(sessionId, runtime.turnFinalized);
+      this.options.peerDigestScheduler?.enqueue({
+        kind: "completion",
+        workPackageId: sessionId,
+        summary: "session runner completed",
+        occurredAt: nowIso(),
+      });
       if (this.getSession(sessionId)?.status !== "failed") {
         this.setStatus(sessionId, "waiting_input");
       }
@@ -1015,6 +1312,13 @@ export class SessionManager {
 
     this.advanceImportedRolloutCursorToCurrentEnd(sessionId, runtime.turnFinalized);
     this.setStatus(sessionId, "failed");
+    this.options.peerDigestScheduler?.enqueue({
+      kind: "delivery_failure",
+      workPackageId: sessionId,
+      summary: "session runner failed",
+      occurredAt: nowIso(),
+    });
+    this.options.peerCommunication?.dormantSession(sessionId, "failed");
   }
 
   private advanceImportedRolloutCursorToCurrentEnd(

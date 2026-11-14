@@ -1,7 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { CodexExecLaunchInput } from "../types/codex-launch";
-import type { CodexRunner } from "./codex-runner";
+import { buildCodexChildEnvironment, type CodexRunner } from "./codex-runner";
+import { buildCodexMcpToolPolicyOverrides } from "../utils/codex-launch";
 
 export interface CodexJsonEvent {
   type: string;
@@ -35,6 +36,8 @@ export class CodexExecRunner implements CodexRunner {
   constructor(
     private readonly command: string,
     private readonly cwd: string,
+    private readonly codexHome?: string | null,
+    private readonly peerCredential?: string | null,
   ) {}
 
   start(prompt: string, threadId?: string | null, launch?: CodexExecLaunchInput): number {
@@ -42,7 +45,7 @@ export class CodexExecRunner implements CodexRunner {
 
     this.process = spawn(this.command, args, {
       cwd: this.cwd,
-      env: process.env,
+      env: buildCodexChildEnvironment(this.codexHome, this.peerCredential),
       stdio: "pipe",
     });
 
@@ -152,6 +155,14 @@ export class CodexExecRunner implements CodexRunner {
 
     for (const name of launch?.disableFeatures ?? []) {
       mid.push("--disable", name);
+    }
+
+    for (const [key, value] of Object.entries(buildCodexMcpToolPolicyOverrides(
+      launch?.allowedTools || launch?.deniedTools
+        ? { allowedTools: launch.allowedTools, deniedTools: launch.deniedTools }
+        : undefined,
+    ))) {
+      mid.push("-c", `${key}=${value}`);
     }
 
     if (threadId) {

@@ -30,3 +30,7 @@ export function resolvePackageRoot(startDir = __dirname): string {
 export function resolveDefaultDatabasePath(): string {
   return path.join(homedir(), ".remcodex", "remcodex.db");
 }
+
+export function resolveDefaultConfigPath(): string {
+  return path.join(homedir(), ".remcodex", "config.toml");
+}

@@ -335,6 +335,7 @@ export function translateCodexAppServerMessage(
       readString(item?.type) ||
       readString(params?.type);
     if (itemType === "agentMessage") {
+      const text = readMessageText(item) || "";
       signals.push({
         kind: "event",
         event: {
@@ -346,7 +347,8 @@ export function translateCodexAppServerMessage(
             normalizePhase(item?.phase) ||
             "final_answer",
           payload: {
-            text: readMessageText(item) || "",
+            textDelta: text,
+            text,
           },
         },
       });
@@ -362,6 +364,7 @@ export function translateCodexAppServerMessage(
           turnId,
           messageId: readMessageId(params),
           payload: {
+            textDelta: summary,
             text: summary,
             summary,
           },

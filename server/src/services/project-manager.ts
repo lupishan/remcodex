@@ -48,6 +48,42 @@ export class ProjectManager {
     );
   }
 
+  getProjectByPath(projectPath: string): ProjectRecord | null {
+    const trimmedPath = projectPath.trim();
+    if (!trimmedPath) {
+      return null;
+    }
+
+    const resolvedPath = path.resolve(trimmedPath);
+    return (
+      this.listProjects().find((project) => path.resolve(project.path) === resolvedPath) ?? null
+    );
+  }
+
+  isProjectPathAncestor(parentProjectId: string, childProjectId: string): boolean {
+    const parent = this.getProject(parentProjectId);
+    const child = this.getProject(childProjectId);
+    if (!parent || !child) {
+      return false;
+    }
+
+    const relative = path.relative(path.resolve(parent.path), path.resolve(child.path));
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  }
+
+  getOrCreateProjectByPath(projectPath: string, name?: string): ProjectRecord {
+    const existing = this.getProjectByPath(projectPath);
+    if (existing) {
+      return existing;
+    }
+
+    const resolvedPath = path.resolve(projectPath.trim());
+    return this.createProject({
+      name: name?.trim() || path.basename(resolvedPath) || resolvedPath,
+      path: resolvedPath,
+    });
+  }
+
   createProject(input: { name: string; path: string; createMissing?: boolean }): ProjectRecord {
     const name = input.name.trim();
     const resolvedPath = path.resolve(input.path.trim());

@@ -331,6 +331,141 @@ body {
   gap: 0.5rem;
 }
 
+.workspace-sidebar-new-session-group {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+}
+
+.workspace-sidebar-new-session-toggle,
+.workspace-sidebar-new-session-main {
+  border: 1px solid rgba(112, 82, 42, 0.08);
+  background: rgba(255, 255, 255, 0.74);
+  color: var(--ink);
+  height: 40px;
+  min-height: 40px;
+  padding: 0 0.9rem;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease, color 120ms ease;
+}
+
+.workspace-sidebar-new-session-toggle:hover,
+.workspace-sidebar-new-session-main:hover {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(143, 63, 27, 0.18);
+  color: rgba(17, 17, 15, 0.92);
+  transform: translateY(-1px);
+}
+
+.workspace-sidebar-new-session-toggle {
+  width: 2.4rem;
+  flex: 0 0 auto;
+  border-radius: 14px 0 0 14px;
+  border-right-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.workspace-sidebar-new-session-toggle svg {
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.workspace-sidebar-new-session-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: 0 14px 14px 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.workspace-sidebar-new-session-main-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-sidebar-new-session-main-profile {
+  flex: 0 0 auto;
+  max-width: 11rem;
+  padding: 0.24rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(188, 90, 48, 0.1);
+  color: rgba(88, 47, 23, 0.92);
+  font-size: 0.74rem;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-sidebar-new-session-menu {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  left: 0;
+  z-index: 12;
+  min-width: 15rem;
+  max-width: min(20rem, calc(100vw - 2rem));
+  padding: 0.35rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(112, 82, 42, 0.12);
+  background: rgba(255, 251, 244, 0.98);
+  box-shadow: 0 14px 28px rgba(113, 74, 21, 0.14);
+}
+
+.workspace-sidebar-new-session-option {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: rgba(35, 33, 29, 0.8);
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 0.7rem;
+  font-size: 0.85rem;
+  line-height: 1.2;
+  cursor: pointer;
+  text-align: left;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.workspace-sidebar-new-session-option:hover,
+.workspace-sidebar-new-session-option-active {
+  background: rgba(188, 90, 48, 0.1);
+  color: rgba(35, 24, 17, 0.94);
+}
+
+.workspace-sidebar-new-session-option-check {
+  min-width: 1rem;
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.workspace-sidebar-new-session-option-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .workspace-sidebar-actions .primary-button {
   display: inline-flex;
   align-items: center;
@@ -418,6 +553,52 @@ body {
   grid-auto-rows: max-content;
 }
 
+.workspace-session-item-row,
+.session-tree-row {
+  display: block;
+  min-width: 0;
+  padding-left: calc(var(--session-indent, 0) * 0.82rem);
+}
+
+.workspace-session-item-row + .workspace-session-item-row,
+.session-tree-row + .session-tree-row {
+  margin-top: 0.02rem;
+}
+
+.workspace-session-item-toggle {
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(91, 84, 71, 0.76);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.workspace-session-item-toggle:hover {
+  color: rgba(35, 33, 29, 0.92);
+  background: rgba(188, 90, 48, 0.08);
+  transform: translateY(-1px);
+}
+
+.workspace-session-item-toggle svg {
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.workspace-session-item-toggle-spacer {
+  pointer-events: none;
+}
+
 .workspace-session-item {
   width: 100%;
   display: grid;
@@ -433,6 +614,34 @@ body {
   transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
 }
 
+.workspace-session-item-head {
+  display: grid;
+  grid-template-columns: 1.15rem minmax(0, 1fr) auto auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.workspace-session-item-head .workspace-session-item-toggle {
+  justify-self: center;
+}
+
+.workspace-session-item--child {
+  padding-top: 0.66rem;
+  padding-bottom: 0.66rem;
+  background: rgba(255, 255, 255, 0.5);
+  border-color: rgba(112, 82, 42, 0.05);
+  color: rgba(35, 33, 29, 0.88);
+}
+
+.workspace-session-item--child .workspace-session-item-title,
+.workspace-session-item--child .record-title-row h3 {
+  font-size: 0.84rem;
+}
+
+.workspace-session-item--ancestor {
+  color: rgba(35, 33, 29, 0.92);
+}
+
 .workspace-session-item:hover {
   border-color: rgba(143, 63, 27, 0.16);
   background: rgba(255, 255, 255, 0.76);
@@ -445,27 +654,26 @@ body {
   box-shadow: inset 0 0 0 1px rgba(188, 90, 48, 0.06);
 }
 
-.workspace-session-item-head,
-.workspace-session-item-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  min-width: 0;
-}
-
 .workspace-session-item-title {
   flex: 1 1 auto;
   min-width: 0;
   font-size: 0.88rem;
   font-weight: 600;
   line-height: 1.35;
-  white-space: nowrap;
+  white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .workspace-session-item-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
   font-size: 0.72rem;
   line-height: 1.35;
   color: rgba(60, 67, 74, 0.56);
@@ -493,6 +701,23 @@ body {
   flex: 0 0 auto;
   white-space: nowrap;
   line-height: 1;
+}
+
+.session-liveness-indicator {
+  width: 0.62rem;
+  height: 0.62rem;
+  flex: 0 0 auto;
+  display: inline-block;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.7);
+}
+
+.session-liveness-indicator-connected {
+  background: #2d9b5f;
+}
+
+.session-liveness-indicator-disconnected {
+  background: #c94a3d;
 }
 
 .workspace-session-empty {
@@ -1148,6 +1373,11 @@ button:hover {
   transform: translateY(-1px);
 }
 
+:where(button, input, select, textarea, a):focus-visible {
+  outline: 3px solid rgba(188, 90, 48, 0.42);
+  outline-offset: 3px;
+}
+
 .primary-button,
 .secondary-button,
 .danger-button {
@@ -1198,6 +1428,30 @@ button:hover {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+}
+
+.session-tree-row .record-title-row {
+  display: grid;
+  grid-template-columns: 1.15rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.session-tree-row .record-title-row h3 {
+  min-width: 0;
+  line-height: 1.28;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.session-tree-row .record-title-row .workspace-session-item-toggle {
+  justify-self: center;
+}
+
+.session-tree-row .record-title-row .pill {
+  justify-self: end;
 }
 
 .record-path,
@@ -1262,6 +1516,14 @@ button:hover {
 
 .session-card {
   cursor: pointer;
+}
+
+.session-open-link {
+  display: inline-block;
+  margin: 0.15rem 0.95rem 0.75rem;
+  color: var(--accent-strong);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .session-toolbar {
@@ -2011,6 +2273,38 @@ button:hover {
     0 0 0 3px rgba(186, 58, 39, 0.1);
 }
 
+.composer-starting-prompt-banner {
+  margin: 0 0 0.38rem;
+  padding: 0.34rem 0.52rem 0.44rem;
+  border-radius: 0.85rem;
+  background: rgba(188, 90, 48, 0.08);
+  border: 1px solid rgba(188, 90, 48, 0.14);
+  color: rgba(63, 48, 37, 0.9);
+  font-size: 0.88rem;
+  line-height: 1.35;
+  font-style: italic;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.composer-starting-prompt-banner-label {
+  margin: 0 0 0.12rem;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.composer-starting-prompt-banner-text {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: inherit;
+}
+
 .input-area {
   flex: 0 1 auto;
   width: 100%;
@@ -2077,6 +2371,13 @@ button:hover {
   align-items: center;
   justify-content: flex-end;
   gap: 0.28rem;
+}
+
+.composer-action-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.34rem;
 }
 
 .toolbar-env {
@@ -2189,12 +2490,68 @@ button:hover {
   transform: scale(0.97);
 }
 
+.composer-action-fab--voice {
+  background: rgba(188, 90, 48, 0.12);
+  color: var(--accent-strong);
+  border: 1px solid rgba(188, 90, 48, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.composer-action-fab--voice:hover:not(:disabled) {
+  transform: scale(1.04);
+  background: rgba(188, 90, 48, 0.16);
+}
+
+.composer-action-fab--voice:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.composer-action-fab--voice:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.composer-action-fab--voice-recording {
+  background: linear-gradient(145deg, #9a2e22, #d4533f);
+  color: #fff7f4;
+  border-color: transparent;
+  box-shadow: 0 0 0 0 rgba(196, 71, 56, 0.35);
+  animation: composer-voice-pulse 1.3s ease-out infinite;
+}
+
+.composer-action-fab--voice-transcribing {
+  background: linear-gradient(145deg, #3a332a, #5b5043);
+  color: #fffaf4;
+  border-color: transparent;
+}
+
 .composer-action-icon {
   display: block;
   width: 0.82rem;
   height: 0.82rem;
   margin-left: 1px;
   margin-top: 1px;
+}
+
+.composer-action-icon--voice {
+  margin-left: 0;
+  margin-top: 0;
+}
+
+@keyframes composer-voice-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(196, 71, 56, 0.38);
+  }
+
+  70% {
+    box-shadow: 0 0 0 0.42rem rgba(196, 71, 56, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(196, 71, 56, 0);
+  }
 }
 
 .input-popover {
@@ -5684,4 +6041,14 @@ button:hover {
 .task-step-item-command .assistant-command-item-inline-detail details {
   display: block;
   width: 100%;
+}
+
+/* Keep keyboard focus visible for controls with specialized focus styling. */
+.composer-meta-input:focus-visible,
+.composer-meta-select:focus-visible,
+.toolbar-select:focus-visible,
+.toolbar-env:focus-visible,
+.composer-action-fab:focus-visible {
+  outline: 3px solid rgba(188, 90, 48, 0.42);
+  outline-offset: 3px;
 }
